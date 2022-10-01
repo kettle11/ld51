@@ -150,6 +150,8 @@ struct SceneInfo {
     moving_offset: Vec2,
     running: bool,
     materials: Vec<Handle<Material>>,
+    screen_shake_amount: f32,
+    freeze_time: f32,
 }
 
 impl SceneInfo {
@@ -159,6 +161,8 @@ impl SceneInfo {
             moving_offset: Vec2::ZERO,
             running: true,
             materials,
+            screen_shake_amount: 0.0,
+            freeze_time: 0.0,
         }
     }
 }
@@ -183,69 +187,77 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
                 shader: Shader::UNLIT,
                 ..Default::default()
             }),
+            material_store.add(Material {
+                base_color: Color::PURPLE.with_chroma(0.8).with_lightness(0.6),
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
         ]
         .into()
     };
 
     world.clear();
 
-    world.spawn((
+    let camera_parent = world.spawn((Transform::new(),));
+    let camera = world.spawn((
         Transform::new(),
         Camera {
             clear_color: Some(Color::CORNFLOWER_BLUE),
 
             projection_mode: ProjectionMode::Orthographic {
-                height: 10.0,
+                height: 16.0,
                 z_near: -1.0,
                 z_far: 2.0,
             },
 
             ..Default::default()
         },
-        CameraControls::default(),
+        // CameraControls::default(),
     ));
+    world.set_parent(camera_parent, camera);
 
     let mut rapier_integration = RapierIntegration::new();
-    rapier_integration.add_collider(ColliderBuilder::cuboid(100.0, 0.1).build());
 
     /*
-    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-        RigidBodyBuilder::dynamic().build(),
-        ColliderBuilder::ball(0.5).restitution(0.7).build(),
+    create_cannon(
+        world,
+        &mut rapier_integration,
+        &materials,
+        Transform::new().with_position(-Vec3::X * 2.0),
     );
 
-
-    world.spawn((
-        Transform::new().with_position(Vec3::Y * 3.0),
-        Mesh::VERTICAL_CIRCLE,
-        Material::UNLIT,
-        rapier_handle,
-    ));
-
-    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-        RigidBodyBuilder::dynamic().build(),
-        ColliderBuilder::ball(0.5).restitution(0.7).build(),
+    create_victory_orb(
+        world,
+        &mut rapier_integration,
+        &materials,
+        Transform::new().with_position(-Vec3::X * 4.0),
     );
-    world.spawn((
-        Transform::new().with_position(Vec3::Y * 1.0),
-        Mesh::VERTICAL_CIRCLE,
-        Material::UNLIT,
-        rapier_handle,
-    ));
+    create_laser(
+        world,
+        &mut rapier_integration,
+        &materials,
+        Transform::new().with_position(-Vec3::X * 1.0),
+    );
 
+    create_environment_chunk(world, &mut rapier_integration, &materials, Vec3::ZERO);
     */
 
-    create_cannon(world, &mut rapier_integration, &materials);
-
-    create_victory_orb(world, &mut rapier_integration, &materials, -Vec3::X * 4.0);
-    create_laser(world, &mut rapier_integration, &materials, -Vec3::X * 1.0);
+    deserialize_world(
+        &std::fs::read_to_string("src/level.txt").unwrap(),
+        world,
+        &mut rapier_integration,
+        &materials,
+    );
 
     resources.add(rapier_integration);
+
     resources.add(SceneInfo {
         moving_entity: None,
         moving_offset: Vec2::ZERO,
         running: true,
         materials,
+        screen_shake_amount: 0.0,
+        freeze_time: 0.0,
     });
 }
 
@@ -259,6 +271,8 @@ struct Particle {}
 fn run_victory_orb(world: &mut World, resources: &mut Resources) {
     let time = resources.get::<Time>();
     let mut rapier_integration = resources.get::<RapierIntegration>();
+
+    let mut scene_info = resources.get::<SceneInfo>();
 
     let mut to_despawn = Vec::new();
 
@@ -286,8 +300,12 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
                     println!("CONTACT WITH VICTORY ORB: {:?}", contact_pair.collider2);
                     to_despawn.push(entity);
                     victory_orb.power += 0.1;
-                    if victory_orb.power > 1.0 {
+                    scene_info.screen_shake_amount += 0.05;
+                    if victory_orb.power > 0.1 {
+                        scene_info.screen_shake_amount += 0.3;
+
                         victory_orb.power = 1.0;
+                        scene_info.freeze_time = 1.0;
                         println!("WIN CONDITION");
                     }
                 }
@@ -300,7 +318,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
             .scale = Vec3::fill(victory_orb.power);
     }
     for e in to_despawn {
-        let _ = world.despawn(e);
+        let _ = world.insert(e, (Ephemeral(0.2),));
     }
 }
 
@@ -308,7 +326,7 @@ fn create_victory_orb(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
     materials: &[Handle<Material>],
-    position: Vec3,
+    transform: Transform,
 ) {
     let scale = 2.0;
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
@@ -319,17 +337,13 @@ fn create_victory_orb(
     );
 
     let child = world.spawn((
-        Transform::new()
-            .with_scale(Vec3::fill(1.2))
-            .with_position(Vec3::Z * 0.2),
+        Transform::new(),
         Mesh::VERTICAL_CIRCLE,
         materials[2].clone(),
     ));
 
     let parent = world.spawn((
-        Transform::new()
-            .with_position(position)
-            .with_scale(Vec3::fill(scale)),
+        transform.with_scale(Vec3::fill(scale) * 1.2),
         Mesh::VERTICAL_CIRCLE,
         materials[1].clone(),
         rapier_handle,
@@ -339,7 +353,9 @@ fn create_victory_orb(
     world.set_parent(parent, child).unwrap();
 }
 
-struct Laser;
+struct Laser {
+    child: Entity,
+}
 
 struct Activated(bool);
 
@@ -371,7 +387,7 @@ fn create_laser(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
     materials: &[Handle<Material>],
-    position: Vec3,
+    transform: Transform,
 ) {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
@@ -380,20 +396,30 @@ fn create_laser(
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .build(),
     );
-    world.spawn((
-        Transform::new()
-            .with_position(position + Vec3::Z * 0.1)
-            .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
+
+    let child = world.spawn((
+        Transform::new().with_position(Vec3::Z * 0.2),
+        Mesh::VERTICAL_QUAD,
+        materials[0].clone(),
+    ));
+
+    let parent = world.spawn((
+        transform,
+        // Transform::new()
+        //     .with_position(position + Vec3::Z * 0.1)
+        //     .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
         Mesh::VERTICAL_QUAD,
         materials[2].clone(),
-        Laser,
+        Laser { child },
         Activated(false),
         ActivateOnTimer {
             current: 0.0,
-            frequency: 10.0, // Every 10 seconds!
+            frequency: 1.0, // Every 10 seconds!
         },
         rapier_handle,
     ));
+
+    world.set_parent(parent, child).unwrap();
 }
 
 fn run_laser(world: &mut World, resources: &mut Resources) {
@@ -401,10 +427,21 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
 
     let mut to_spawn = Vec::new();
 
-    for (_, (transform, _laser, rigid_body, activated)) in world
-        .query::<(&GlobalTransform, &mut Laser, &RapierRigidBody, &Activated)>()
+    for (_, (transform, laser, rigid_body, activated, activated_on_timer)) in world
+        .query::<(
+            &GlobalTransform,
+            &mut Laser,
+            &RapierRigidBody,
+            &Activated,
+            &ActivateOnTimer,
+        )>()
         .iter()
     {
+        world.get::<&mut Transform>(laser.child).unwrap().scale = Vec3::fill(
+            (activated_on_timer.frequency - activated_on_timer.current)
+                / activated_on_timer.frequency,
+        );
+
         if activated.0 {
             println!("ACTIVATE LASER!");
             let direction = transform.right().xy().normalized();
@@ -462,7 +499,7 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
                 )),
             Mesh::VERTICAL_QUAD,
             Material::UNLIT,
-            Ephemeral(0.5),
+            Ephemeral(0.8),
         ));
     }
 }
@@ -473,6 +510,7 @@ fn create_cannon(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
     materials: &[Handle<Material>],
+    transform: Transform,
 ) {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
@@ -482,14 +520,37 @@ fn create_cannon(
             .build(),
     );
     world.spawn((
-        Transform::new()
-            .with_position(Vec3::Y * 2.0 + Vec3::Z * 0.1)
-            .with_rotation(Quat::from_angle_axis(0.9, Vec3::Z)),
+        transform,
         Mesh::VERTICAL_QUAD,
         materials[0].clone(),
         Cannon,
         Activated(false),
         rapier_handle,
+    ));
+}
+
+struct EnvironmentChunk;
+
+fn create_environment_chunk(
+    world: &mut World,
+    rapier_integration: &mut RapierIntegration,
+    materials: &[Handle<Material>],
+    transform: Transform,
+) {
+    let scale = 4.0;
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::cuboid(0.5 * scale, 0.5 * scale)
+            .restitution(0.7)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .build(),
+    );
+    world.spawn((
+        transform.with_scale(Vec3::fill(4.0)),
+        Mesh::VERTICAL_QUAD,
+        materials[3].clone(),
+        rapier_handle,
+        EnvironmentChunk,
     ));
 }
 
@@ -531,7 +592,7 @@ struct Ephemeral(f32);
 pub fn run_ephemeral(world: &mut World, time: &Time) {
     let mut to_despawn = Vec::new();
     for (e, ephermal) in world.query::<With<&mut Ephemeral, ()>>().iter() {
-        ephermal.0 -= time.draw_delta_seconds as f32;
+        ephermal.0 -= time.fixed_time_step_seconds as f32;
         if ephermal.0 < 0.0 {
             to_despawn.push(e);
         }
@@ -542,33 +603,207 @@ pub fn run_ephemeral(world: &mut World, time: &Time) {
     }
 }
 
-fn main() {
-    App::default().setup_and_run(|world, resources| {
-        setup(world, resources);
+fn serialize_world(world: &mut World) -> String {
+    let mut output = String::new();
+    for (_e, (transform, _laser)) in world.query::<(&Transform, &Laser)>().iter() {
+        output += &format!(
+            "l {:?} {:?}  {:?}\n",
+            transform.position.x,
+            transform.position.y,
+            transform.rotation.to_angle_axis().0
+        );
+    }
 
-        move |event, world, resources| match event {
-            Event::Draw => {
-                run_ephemeral(world, &*resources.get::<Time>());
+    for (_e, (transform, _laser)) in world.query::<(&Transform, &Cannon)>().iter() {
+        output += &format!(
+            "c {:?} {:?}  {:?}\n",
+            transform.position.x,
+            transform.position.y,
+            transform.rotation.to_angle_axis().0
+        );
+    }
+
+    for (_e, (transform, _laser)) in world.query::<(&Transform, &VictoryOrb)>().iter() {
+        output += &format!(
+            "v {:?} {:?}  {:?}\n",
+            transform.position.x,
+            transform.position.y,
+            transform.rotation.to_angle_axis().0
+        );
+    }
+    for (_e, (transform, _laser)) in world.query::<(&Transform, &EnvironmentChunk)>().iter() {
+        output += &format!(
+            "b {:?} {:?}  {:?}\n",
+            transform.position.x,
+            transform.position.y,
+            transform.rotation.to_angle_axis().0
+        );
+    }
+    output
+}
+
+fn deserialize_world(
+    string: &str,
+    world: &mut World,
+    rapier_integration: &mut RapierIntegration,
+    materials: &[Handle<Material>],
+) {
+    for line in string.trim().split('\n') {
+        let mut values = line.split_ascii_whitespace();
+        let first_char = values.next();
+
+        let x: f32 = values.next().unwrap().parse().unwrap();
+        let y: f32 = values.next().unwrap().parse().unwrap();
+
+        let position = Vec3::new(x, y, 0.0);
+
+        let r: f32 = values.next().unwrap().parse().unwrap();
+
+        let transform = Transform::new()
+            .with_position(position)
+            .with_rotation(Quat::from_angle_axis(r, Vec3::Z));
+
+        match first_char {
+            Some("l") => create_laser(world, rapier_integration, materials, transform),
+            Some("c") => create_cannon(world, rapier_integration, materials, transform),
+            Some("v") => create_victory_orb(world, rapier_integration, materials, transform),
+            Some("b") => create_environment_chunk(world, rapier_integration, materials, transform),
+            Some(_) => {
+                panic!()
             }
-            Event::FixedUpdate => {
-                {
-                    let key_pressed = resources.get::<Input>().key_down(Key::R);
-                    if key_pressed {
-                        setup(world, resources);
-                    }
+            None => {}
+        }
+    }
+}
+
+fn main() {
+    App::default()
+        .with_resource(InitialSettings {
+            color_space: koi_graphics_context::ColorSpace::SRGB,
+            window_width: 1200,
+            window_height: 1200,
+            ..Default::default()
+        })
+        .setup_and_run(|world, resources| {
+            setup(world, resources);
+
+            let mut random = Random::new();
+            move |event, world, resources| match event {
+                Event::Draw => {
+                    let screen_shake_amount = &mut resources.get::<SceneInfo>().screen_shake_amount;
+                    let screen_shake = Vec2::new(
+                        random.range_f32(-*screen_shake_amount..*screen_shake_amount),
+                        random.range_f32(-*screen_shake_amount..*screen_shake_amount),
+                    );
+
+                    let mut q = world.query::<(&mut Transform, &Camera)>();
+                    let mut iter = q.iter();
+                    let (camera_transform, _camera) = iter.next().unwrap().1;
+                    camera_transform.position = screen_shake.extend(camera_transform.position.z);
+                    *screen_shake_amount *= 0.94;
                 }
+                Event::FixedUpdate => {
+                    {
+                        if resources.get::<Input>().key_down(Key::L) {
+                            setup(world, resources);
+                        }
 
-                {
-                    let input = resources.get::<Input>();
-                    let mut rapier_integration = resources.get::<RapierIntegration>();
-                    let mut scene_info = resources.get::<SceneInfo>();
+                        #[cfg(debug_assertions)]
+                        {
+                            if resources.get::<Input>().key_down(Key::S) {
+                                let level = serialize_world(world);
+                                klog::log!("SAVING LEVEL");
+                                klog::log!("{}", level);
+                                std::fs::write("src/level.txt", level.as_bytes()).unwrap();
+                            }
 
-                    if input.key_down(Key::P) {
-                        scene_info.running = !scene_info.running;
+                            let mut rapier_integration = resources.get::<RapierIntegration>();
+                            let mut scene_info = resources.get::<SceneInfo>();
+
+                            if resources.get::<Input>().key_down(Key::Backspace) {
+                                if let Some(moving_entity) = scene_info.moving_entity {
+                                    world.despawn(moving_entity).unwrap();
+                                    scene_info.moving_entity = None;
+                                }
+                            }
+
+                            if resources.get::<Input>().key_down(Key::A) {
+                                scene_info.screen_shake_amount += 0.05;
+                            }
+
+                            if resources.get::<Input>().key(Key::R) {
+                                if let Some(moving_entity) = scene_info.moving_entity {
+                                    let rotation = &mut world
+                                        .get::<&mut Transform>(moving_entity)
+                                        .unwrap()
+                                        .rotation;
+                                    *rotation = *rotation
+                                        * Quat::from_angle_axis(
+                                            resources.get::<Input>().scroll().1 as f32 * 0.05,
+                                            Vec3::Z,
+                                        );
+                                }
+                            }
+
+                            if resources.get::<Input>().key_down(Key::B) {
+                                create_environment_chunk(
+                                    world,
+                                    &mut rapier_integration,
+                                    &scene_info.materials,
+                                    Transform::new(),
+                                );
+                            }
+                        }
                     }
 
-                    if input.pointer_button_released(PointerButton::Primary) {
+                    {
+                        let input = resources.get::<Input>();
+                        let mut rapier_integration = resources.get::<RapierIntegration>();
+                        let mut scene_info = resources.get::<SceneInfo>();
+
+                        if input.key_down(Key::P) {
+                            scene_info.running = !scene_info.running;
+                        }
+
+                        if input.pointer_button_released(PointerButton::Primary) {
+                            if let Some(moving_entity) = scene_info.moving_entity {
+                                let rigid_body_handle = rapier_integration
+                                    .rigid_body_set
+                                    .get_mut(
+                                        world
+                                            .get::<&mut RapierRigidBody>(moving_entity)
+                                            .unwrap()
+                                            .rigid_body_handle,
+                                    )
+                                    .unwrap();
+
+                                rigid_body_handle.set_gravity_scale(1.0, false);
+                            }
+                            scene_info.moving_entity = None;
+                        }
+
+                        let pointer_position = {
+                            let (x, y) = input.pointer_position();
+                            let mut q = world.query::<(&Transform, &Camera)>();
+                            let mut iter = q.iter();
+                            let (camera_transform, camera) = iter.next().unwrap().1;
+
+                            let view_size = resources.get::<kapp::Window>().size();
+                            let ray = camera.view_to_ray(
+                                camera_transform,
+                                x as _,
+                                y as _,
+                                view_size.0 as _,
+                                view_size.1 as _,
+                            );
+                            ray.origin.xy()
+                        };
+
                         if let Some(moving_entity) = scene_info.moving_entity {
+                            let position =
+                                &mut world.get::<&mut Transform>(moving_entity).unwrap().position;
+                            *position =
+                                (pointer_position - scene_info.moving_offset).extend(position.z);
                             let rigid_body_handle = rapier_integration
                                 .rigid_body_set
                                 .get_mut(
@@ -578,87 +813,60 @@ fn main() {
                                         .rigid_body_handle,
                                 )
                                 .unwrap();
-
-                            rigid_body_handle.set_gravity_scale(1.0, false);
+                            rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
+                            rigid_body_handle.set_angvel(0.0, false);
+                            rigid_body_handle.set_gravity_scale(0.0, false);
                         }
-                        scene_info.moving_entity = None;
+
+                        if input.pointer_button_down(PointerButton::Primary) {
+                            rapier_integration.query_pipeline.intersections_with_point(
+                                &rapier_integration.rigid_body_set,
+                                &rapier_integration.collider_set,
+                                &point![pointer_position.x, pointer_position.y],
+                                QueryFilter::default()
+                                    .predicate(&|_, c: &Collider| c.parent().is_some()),
+                                |handle| {
+                                    let collider =
+                                        rapier_integration.collider_set.get(handle).unwrap();
+                                    if collider.user_data != 0 {
+                                        let entity =
+                                            Entity::from_bits(collider.user_data as _).unwrap();
+                                        scene_info.moving_offset = pointer_position
+                                            - world
+                                                .get::<&mut Transform>(entity)
+                                                .unwrap()
+                                                .position
+                                                .xy();
+
+                                        scene_info.moving_entity = Some(entity);
+                                    }
+                                    false
+                                },
+                            );
+                        }
                     }
 
-                    let pointer_position = {
-                        let (x, y) = input.pointer_position();
-                        let mut q = world.query::<(&Transform, &Camera)>();
-                        let mut iter = q.iter();
-                        let (camera_transform, camera) = iter.next().unwrap().1;
+                    if resources.get::<SceneInfo>().running {
+                        if resources.get::<SceneInfo>().freeze_time <= 0.0 {
+                            run_ephemeral(world, &*resources.get::<Time>());
 
-                        let view_size = resources.get::<kapp::Window>().size();
-                        let ray = camera.view_to_ray(
-                            camera_transform,
-                            x as _,
-                            y as _,
-                            view_size.0 as _,
-                            view_size.1 as _,
-                        );
-                        ray.origin.xy()
-                    };
+                            for (_, activated) in world.query::<&mut Activated>().iter() {
+                                activated.0 = false;
+                            }
 
-                    if let Some(moving_entity) = scene_info.moving_entity {
-                        world.get::<&mut Transform>(moving_entity).unwrap().position =
-                            (pointer_position - scene_info.moving_offset).extend(0.0);
-                        let rigid_body_handle = rapier_integration
-                            .rigid_body_set
-                            .get_mut(
-                                world
-                                    .get::<&mut RapierRigidBody>(moving_entity)
-                                    .unwrap()
-                                    .rigid_body_handle,
-                            )
-                            .unwrap();
-                        rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
-                        rigid_body_handle.set_angvel(0.0, false);
-                        rigid_body_handle.set_gravity_scale(0.0, false);
-                    }
-
-                    if input.pointer_button_down(PointerButton::Primary) {
-                        rapier_integration.query_pipeline.intersections_with_point(
-                            &rapier_integration.rigid_body_set,
-                            &rapier_integration.collider_set,
-                            &point![pointer_position.x, pointer_position.y],
-                            QueryFilter::default()
-                                .predicate(&|_, c: &Collider| c.parent().is_some()),
-                            |handle| {
-                                let collider = rapier_integration.collider_set.get(handle).unwrap();
-                                if collider.user_data != 0 {
-                                    let entity =
-                                        Entity::from_bits(collider.user_data as _).unwrap();
-                                    scene_info.moving_offset = pointer_position
-                                        - world
-                                            .get::<&mut Transform>(entity)
-                                            .unwrap()
-                                            .position
-                                            .xy();
-
-                                    scene_info.moving_entity = Some(entity);
-                                }
-                                false
-                            },
-                        );
+                            run_activate_on_timer(world, resources);
+                            run_laser(world, resources);
+                            run_cannon(world, resources);
+                            run_victory_orb(world, resources);
+                            resources.get::<RapierIntegration>().step(world);
+                        } else {
+                            resources.get::<SceneInfo>().freeze_time -=
+                                resources.get::<Time>().fixed_time_step_seconds as f32;
+                        }
                     }
                 }
 
-                if resources.get::<SceneInfo>().running {
-                    for (_, activated) in world.query::<&mut Activated>().iter() {
-                        activated.0 = false;
-                    }
-
-                    run_activate_on_timer(world, resources);
-                    run_laser(world, resources);
-                    run_cannon(world, resources);
-                    run_victory_orb(world, resources);
-                    resources.get::<RapierIntegration>().step(world);
-                }
+                _ => {}
             }
-
-            _ => {}
-        }
-    });
+        });
 }

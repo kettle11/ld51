@@ -594,6 +594,7 @@ source = "git+https://github.com/Lokathor/lawrencium?rev=4079f8a#4079f8a5b1b92c1
 name = "ld51"
 version = "0.1.0"
 dependencies = [
+ "klog",
  "koi3",
  "rapier2d",
 ]

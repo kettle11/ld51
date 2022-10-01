@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 koi3 = {path = "../koi3"}
+klog = {path = "../koi2/crates/klog"}
 rapier2d = "0.14.0"
