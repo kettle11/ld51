@@ -277,6 +277,8 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
     let mut to_despawn = Vec::new();
 
     for (e, (transform, victory_orb)) in world.query::<(&Transform, &mut VictoryOrb)>().iter() {
+        victory_orb.power -= 0.1 * time.fixed_time_step_seconds as f32;
+
         let collider = world.get::<&RapierRigidBody>(e).unwrap();
         for contact_pair in rapier_integration
             .narrow_phase
@@ -301,16 +303,17 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
                     to_despawn.push(entity);
                     victory_orb.power += 0.1;
                     scene_info.screen_shake_amount += 0.05;
-                    if victory_orb.power > 0.1 {
+                    if victory_orb.power > 1.0 {
                         scene_info.screen_shake_amount += 0.3;
 
-                        victory_orb.power = 1.0;
                         scene_info.freeze_time = 1.0;
                         println!("WIN CONDITION");
                     }
                 }
             }
         }
+
+        victory_orb.power = victory_orb.power.clamp(0.2, 1.0);
 
         world
             .get::<&mut Transform>(victory_orb.child)
@@ -319,6 +322,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
     }
     for e in to_despawn {
         let _ = world.insert(e, (Ephemeral(0.2),));
+        let _ = world.remove_one::<Particle>(e);
     }
 }
 
@@ -331,9 +335,7 @@ fn create_victory_orb(
     let scale = 2.0;
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
-        ColliderBuilder::cuboid(0.5 * scale, 0.5 * scale)
-            .restitution(0.7)
-            .build(),
+        ColliderBuilder::ball(0.5 * scale).restitution(0.7).build(),
     );
 
     let child = world.spawn((
@@ -355,31 +357,36 @@ fn create_victory_orb(
 
 struct Laser {
     child: Entity,
+    laser_trigger: f32,
 }
 
-struct Activated(bool);
-
-struct ActivateOnTimer {
-    current: f32,
-    frequency: f32, // Every 10.0 seconds
+struct Activated {
+    this_frame: bool,
+    activated: bool,
+    reset_charge_on_activate: bool,
 }
 
-fn run_activate_on_timer(world: &mut World, resources: &mut Resources) {
+impl Default for Activated {
+    fn default() -> Self {
+        Self {
+            this_frame: false,
+            activated: false,
+            reset_charge_on_activate: false,
+        }
+    }
+}
+
+struct ChargeOnTimer {
+    amount: f32, // Every 10.0 seconds
+}
+
+fn run_charge_on_timer(world: &mut World, resources: &mut Resources) {
     let time = resources.get::<Time>();
 
-    for (_, (timer, activated)) in world
-        .query::<(&mut ActivateOnTimer, &mut Activated)>()
-        .iter()
+    for (_, (charge_on_timer, chargable)) in
+        world.query::<(&mut ChargeOnTimer, &mut Chargable)>().iter()
     {
-        activated.0 = true;
-
-        timer.current -= time.fixed_time_step_seconds as f32;
-        if timer.current < 0.0 {
-            timer.current = timer.frequency;
-            activated.0 = true;
-        } else {
-            activated.0 = false;
-        }
+        chargable.charge(charge_on_timer.amount * time.fixed_time_step_seconds as f32);
     }
 }
 
@@ -410,13 +417,21 @@ fn create_laser(
         //     .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
         Mesh::VERTICAL_QUAD,
         materials[2].clone(),
-        Laser { child },
-        Activated(false),
-        ActivateOnTimer {
-            current: 0.0,
-            frequency: 1.0, // Every 10 seconds!
+        Laser {
+            child,
+            laser_trigger: 0.0,
         },
+        Activated {
+            reset_charge_on_activate: true,
+            ..Default::default()
+        },
+        ChargeOnTimer {
+            amount: 1.0, // Every 10 seconds!
+        },
+        Chargable::default(),
+        Movable,
         rapier_handle,
+        ScaleChildToChargable { child },
     ));
 
     world.set_parent(parent, child).unwrap();
@@ -424,63 +439,108 @@ fn create_laser(
 
 fn run_laser(world: &mut World, resources: &mut Resources) {
     let rapier_integration = resources.get::<RapierIntegration>();
+    let time = resources.get::<Time>();
 
     let mut to_spawn = Vec::new();
 
-    for (_, (transform, laser, rigid_body, activated, activated_on_timer)) in world
-        .query::<(
-            &GlobalTransform,
-            &mut Laser,
-            &RapierRigidBody,
-            &Activated,
-            &ActivateOnTimer,
-        )>()
+    for (_, (transform, laser, rigid_body, activated)) in world
+        .query::<(&GlobalTransform, &mut Laser, &RapierRigidBody, &Activated)>()
         .iter()
     {
-        world.get::<&mut Transform>(laser.child).unwrap().scale = Vec3::fill(
-            (activated_on_timer.frequency - activated_on_timer.current)
-                / activated_on_timer.frequency,
-        );
+        if activated.this_frame {
+            laser.laser_trigger = 0.3;
+        }
 
-        if activated.0 {
-            println!("ACTIVATE LASER!");
+        if laser.laser_trigger > 0.0 {
+            laser.laser_trigger -= time.fixed_time_step_seconds as f32;
+
             let direction = transform.right().xy().normalized();
-            let ray = Ray::new(
-                point![transform.position.x, transform.position.y],
-                vector![direction.x, direction.y],
-            );
 
-            if let Some((collider_handle, intersection)) =
-                rapier_integration.query_pipeline.cast_ray_and_get_normal(
-                    &rapier_integration.rigid_body_set,
-                    &rapier_integration.collider_set,
-                    &ray,
-                    1000.0,
-                    true,
-                    QueryFilter::new().exclude_rigid_body(rigid_body.rigid_body_handle),
-                )
-            {
-                let hit_point = ray.point_at(intersection.toi);
-                let hit_normal = intersection.normal;
-
-                let collider = rapier_integration
-                    .collider_set
-                    .get(collider_handle)
-                    .unwrap();
-                if collider.user_data != 0 {
-                    let entity = Entity::from_bits(collider.user_data as _).unwrap();
-                    if let Ok(mut activated) = world.get::<&mut Activated>(entity) {
-                        activated.0 = true;
-                    }
+            fn raycast(
+                rapier_integration: &RapierIntegration,
+                query_filter: QueryFilter,
+                start: Vec2,
+                direction: Vec2,
+                to_spawn: &mut Vec<(Vec2, Vec2)>,
+                world: &World,
+                depth: usize,
+                delta_time: f32,
+            ) {
+                if depth == 0 {
+                    return;
                 }
 
-                to_spawn.push((transform.position.xy(), Vec2::new(hit_point.x, hit_point.y)));
-            } else {
-                to_spawn.push((
-                    transform.position.xy(),
-                    transform.position.xy() + direction * 100.0,
-                ));
+                let ray = Ray::new(point![start.x, start.y], vector![direction.x, direction.y]);
+
+                if let Some((collider_handle, intersection)) =
+                    rapier_integration.query_pipeline.cast_ray_and_get_normal(
+                        &rapier_integration.rigid_body_set,
+                        &rapier_integration.collider_set,
+                        &ray,
+                        1000.0,
+                        true,
+                        query_filter,
+                    )
+                {
+                    let hit_point = ray.point_at(intersection.toi);
+                    let hit_normal = intersection.normal;
+
+                    let hit_normal = Vec2::new(hit_normal.x, hit_normal.y);
+
+                    let collider = rapier_integration
+                        .collider_set
+                        .get(collider_handle)
+                        .unwrap();
+
+                    let mut reflect = true;
+                    if collider.user_data != 0 {
+                        let entity = Entity::from_bits(collider.user_data as _).unwrap();
+                        if let Ok(mut chargable) = world.get::<&mut Chargable>(entity) {
+                            chargable.charge(8.0 * delta_time);
+                            reflect = false;
+                        }
+
+                        if let Ok(mut cannon) = world.get::<&mut Cannon>(entity) {
+                            cannon.fire_direction = direction;
+                        }
+                    }
+
+                    let end = Vec2::new(hit_point.x, hit_point.y);
+                    to_spawn.push((start, end));
+
+                    let amount_along_normal = hit_normal.dot(direction);
+                    let new_dir = (-2.0 * amount_along_normal * hit_normal
+                        + (1.0 - amount_along_normal) * direction)
+                        .normalized();
+
+                    // println!("NEW DIR: {:?}", new_dir);
+                    if reflect {
+                        raycast(
+                            rapier_integration,
+                            query_filter,
+                            end + new_dir * 0.05,
+                            new_dir,
+                            to_spawn,
+                            world,
+                            depth - 1,
+                            delta_time,
+                        )
+                    }
+                } else {
+                    to_spawn.push((start, start + direction * 100.0));
+                }
             }
+
+            raycast(
+                &rapier_integration,
+                QueryFilter::default().exclude_rigid_body(rigid_body.rigid_body_handle),
+                transform.position.xy(),
+                direction,
+                &mut to_spawn,
+                world,
+                10,
+                time.fixed_time_step_seconds as f32,
+            );
         }
     }
 
@@ -499,12 +559,42 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
                 )),
             Mesh::VERTICAL_QUAD,
             Material::UNLIT,
-            Ephemeral(0.8),
+            Ephemeral(0.1),
         ));
     }
 }
 
-struct Cannon;
+struct Cannon {
+    fire_direction: Vec2,
+}
+
+struct Movable;
+
+struct Chargable {
+    charged: bool,
+    amount: f32,
+    rate: f32,
+}
+
+impl Chargable {
+    pub fn charge(&mut self, amount: f32) {
+        self.amount += amount * self.rate;
+        self.charged = true;
+    }
+}
+
+impl Default for Chargable {
+    fn default() -> Self {
+        Self {
+            charged: false,
+            amount: 0.0,
+            rate: 1.0,
+        }
+    }
+}
+struct ScaleChildToChargable {
+    child: Entity,
+}
 
 fn create_cannon(
     world: &mut World,
@@ -519,14 +609,22 @@ fn create_cannon(
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .build(),
     );
-    world.spawn((
+
+    let child = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[1].clone()));
+    let parent = world.spawn((
         transform,
         Mesh::VERTICAL_QUAD,
         materials[0].clone(),
-        Cannon,
-        Activated(false),
+        Cannon {
+            fire_direction: Vec2::X,
+        },
+        Activated::default(),
+        Chargable::default(),
+        ScaleChildToChargable { child },
+        Movable,
         rapier_handle,
     ));
+    world.set_parent(parent, child).unwrap();
 }
 
 struct EnvironmentChunk;
@@ -550,12 +648,13 @@ fn create_environment_chunk(
         Mesh::VERTICAL_QUAD,
         materials[3].clone(),
         rapier_handle,
+        Movable,
         EnvironmentChunk,
     ));
 }
 
 fn run_cannon(world: &mut World, resources: &mut Resources) {
-    let time = resources.get::<Time>();
+    //let time = resources.get::<Time>();
     let mut rapier_integration = resources.get::<RapierIntegration>();
 
     let mut to_spawn = Vec::new();
@@ -563,9 +662,9 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
         .query::<(&Transform, &mut Cannon, &Activated)>()
         .iter()
     {
-        //  cannon.timer -= time.fixed_time_step_seconds as f32;
-        if activated.0 {
-            to_spawn.push((transform.clone(), transform.right().xy() * 5.0));
+        //  cannon.timer -= time.fixed_time_step_seconds as f32;fr
+        if activated.this_frame {
+            to_spawn.push((transform.clone(), cannon.fire_direction * 6.0));
         }
     }
 
@@ -831,14 +930,17 @@ fn main() {
                                     if collider.user_data != 0 {
                                         let entity =
                                             Entity::from_bits(collider.user_data as _).unwrap();
-                                        scene_info.moving_offset = pointer_position
-                                            - world
-                                                .get::<&mut Transform>(entity)
-                                                .unwrap()
-                                                .position
-                                                .xy();
 
-                                        scene_info.moving_entity = Some(entity);
+                                        if world.get::<&Movable>(entity).is_ok() {
+                                            scene_info.moving_offset = pointer_position
+                                                - world
+                                                    .get::<&mut Transform>(entity)
+                                                    .unwrap()
+                                                    .position
+                                                    .xy();
+
+                                            scene_info.moving_entity = Some(entity);
+                                        }
                                     }
                                     false
                                 },
@@ -850,11 +952,44 @@ fn main() {
                         if resources.get::<SceneInfo>().freeze_time <= 0.0 {
                             run_ephemeral(world, &*resources.get::<Time>());
 
-                            for (_, activated) in world.query::<&mut Activated>().iter() {
-                                activated.0 = false;
+                            {
+                                let time = resources.get::<Time>();
+
+                                for (_, (chargable, activated)) in
+                                    world.query::<(&mut Chargable, &mut Activated)>().iter()
+                                {
+                                    if chargable.charged {
+                                        chargable.charged = false;
+                                    } else {
+                                        chargable.amount -=
+                                            1.0 * time.fixed_time_step_seconds as f32;
+                                    }
+                                    if chargable.amount > 1.0 {
+                                        activated.this_frame = !activated.activated;
+                                        activated.activated = true;
+                                        if activated.reset_charge_on_activate {
+                                            chargable.amount = 0.0
+                                        }
+                                        //chargable.amount = 0.0;
+                                    } else {
+                                        activated.this_frame = false;
+                                        activated.activated = false;
+                                    }
+                                    chargable.amount = chargable.amount.clamp(0.0, 1.0);
+                                }
+
+                                for (_, (chargable, scale_child_to_chargable)) in
+                                    world.query::<(&Chargable, &ScaleChildToChargable)>().iter()
+                                {
+                                    world
+                                        .get::<&mut Transform>(scale_child_to_chargable.child)
+                                        .unwrap()
+                                        .scale =
+                                        Vec3::fill(animation_curves::smooth_step(chargable.amount));
+                                }
                             }
 
-                            run_activate_on_timer(world, resources);
+                            run_charge_on_timer(world, resources);
                             run_laser(world, resources);
                             run_cannon(world, resources);
                             run_victory_orb(world, resources);
