@@ -61,7 +61,28 @@ impl RapierIntegration {
     }
 
     pub fn step(&mut self, world: &mut World) {
-        // If the collider has been moved manually.
+        let mut to_despawn = Vec::new();
+        for collider in self.collider_set.iter() {
+            if collider.1.user_data != 0 {
+                let entity = Entity::from_bits(collider.1.user_data as _).unwrap();
+                if !world.contains(entity) {
+                    to_despawn.push(collider.1.parent().unwrap());
+                }
+            }
+        }
+
+        for c in to_despawn {
+            self.rigid_body_set.remove(
+                c,
+                &mut self.island_manager,
+                &mut self.collider_set,
+                &mut self.impulse_joint_set,
+                &mut self.multibody_joint_set,
+                true,
+            );
+        }
+
+        // If the collider has been moved manually
         for (e, (transform, rigid_body)) in
             world.query::<(&mut Transform, &RapierRigidBody)>().iter()
         {
@@ -111,70 +132,95 @@ impl RapierIntegration {
     }
 }
 
+struct SceneInfo {
+    moving_entity: Option<Entity>,
+    moving_offset: Vec2,
+    running: bool,
+}
+
+impl SceneInfo {
+    pub fn new() -> Self {
+        Self {
+            moving_entity: None,
+            moving_offset: Vec2::ZERO,
+            running: true,
+        }
+    }
+}
+
+pub fn setup(world: &mut World, resources: &mut Resources) {
+    resources.add(SceneInfo {
+        moving_entity: None,
+        moving_offset: Vec2::ZERO,
+        running: true,
+    });
+    world.clear();
+
+    world.spawn((
+        Transform::new(),
+        Camera {
+            clear_color: Some(Color::CORNFLOWER_BLUE),
+            projection_mode: ProjectionMode::Orthographic {
+                height: 10.0,
+                z_near: -1.0,
+                z_far: 2.0,
+            },
+            ..Default::default()
+        },
+    ));
+
+    let mut rapier_integration = RapierIntegration::new();
+    rapier_integration.add_collider(ColliderBuilder::cuboid(100.0, 0.1).build());
+
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::dynamic().build(),
+        ColliderBuilder::ball(0.5).restitution(0.7).build(),
+    );
+    world.spawn((
+        Transform::new().with_position(Vec3::Y * 3.0),
+        Mesh::SPHERE,
+        Material::UNLIT,
+        rapier_handle,
+    ));
+
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::dynamic().build(),
+        ColliderBuilder::ball(0.5).restitution(0.7).build(),
+    );
+    world.spawn((
+        Transform::new().with_position(Vec3::Y * 1.0),
+        Mesh::SPHERE,
+        Material::UNLIT,
+        rapier_handle,
+    ));
+
+    resources.add(rapier_integration);
+}
+
 fn main() {
     App::default().setup_and_run(|world, resources| {
-        world.spawn((
-            Transform::new(),
-            Camera {
-                clear_color: Some(Color::CORNFLOWER_BLUE),
-                projection_mode: ProjectionMode::Orthographic {
-                    height: 10.0,
-                    z_near: -1.0,
-                    z_far: 2.0,
-                },
-                ..Default::default()
-            },
-        ));
+        setup(world, resources);
 
-        let mut rapier_integration = RapierIntegration::new();
-        rapier_integration.add_collider(ColliderBuilder::cuboid(100.0, 0.1).build());
-
-        let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-            RigidBodyBuilder::dynamic().build(),
-            ColliderBuilder::ball(0.5).restitution(0.7).build(),
-        );
-
-        world.spawn((
-            Transform::new().with_position(Vec3::Y * 5.0 + Vec3::X * 0.1),
-            Mesh::SPHERE,
-            Material::UNLIT,
-            rapier_handle,
-        ));
-
-        let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-            RigidBodyBuilder::dynamic().build(),
-            ColliderBuilder::ball(0.5).restitution(0.7).build(),
-        );
-        world.spawn((
-            Transform::new().with_position(Vec3::Y * 3.0),
-            Mesh::SPHERE,
-            Material::UNLIT,
-            rapier_handle,
-        ));
-
-        let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-            RigidBodyBuilder::dynamic().build(),
-            ColliderBuilder::ball(0.5).restitution(0.7).build(),
-        );
-        world.spawn((
-            Transform::new().with_position(Vec3::Y * 1.0),
-            Mesh::SPHERE,
-            Material::UNLIT,
-            rapier_handle,
-        ));
-
-        resources.add(rapier_integration);
-
-        let mut moving_entity = None;
-        let mut moving_offset = Vec2::ZERO;
         move |event, world, resources| match event {
             Event::FixedUpdate => {
                 {
-                    let input = resources.get::<Input>();
+                    let key_pressed = resources.get::<Input>().key_down(Key::R);
+                    if key_pressed {
+                        setup(world, resources);
+                    }
+                }
+                let input = resources.get::<Input>();
+
+                {
                     let mut rapier_integration = resources.get::<RapierIntegration>();
+                    let mut scene_info = resources.get::<SceneInfo>();
+
+                    if input.key_down(Key::P) {
+                        scene_info.running = !scene_info.running;
+                    }
 
                     if input.pointer_button_released(PointerButton::Primary) {
-                        if let Some(moving_entity) = moving_entity {
+                        if let Some(moving_entity) = scene_info.moving_entity {
                             let rigid_body_handle = rapier_integration
                                 .rigid_body_set
                                 .get_mut(
@@ -187,7 +233,7 @@ fn main() {
 
                             rigid_body_handle.set_gravity_scale(1.0, false);
                         }
-                        moving_entity = None;
+                        scene_info.moving_entity = None;
                     }
 
                     let pointer_position = {
@@ -207,9 +253,9 @@ fn main() {
                         ray.origin.xy()
                     };
 
-                    if let Some(moving_entity) = moving_entity {
+                    if let Some(moving_entity) = scene_info.moving_entity {
                         world.get::<&mut Transform>(moving_entity).unwrap().position =
-                            (pointer_position - moving_offset).extend(0.0);
+                            (pointer_position - scene_info.moving_offset).extend(0.0);
                         let rigid_body_handle = rapier_integration
                             .rigid_body_set
                             .get_mut(
@@ -234,17 +280,21 @@ fn main() {
                                 println!("INTERSECTED WITH: {:?}", handle);
                                 let collider = rapier_integration.collider_set.get(handle).unwrap();
                                 let entity = Entity::from_bits(collider.user_data as _).unwrap();
-                                moving_offset = pointer_position
+                                scene_info.moving_offset = pointer_position
                                     - world.get::<&mut Transform>(entity).unwrap().position.xy();
 
-                                moving_entity = Some(entity);
+                                scene_info.moving_entity = Some(entity);
                                 false
                             },
                         );
                     }
                 }
 
-                resources.get::<RapierIntegration>().step(world);
+                let mut scene_info = resources.get::<SceneInfo>();
+
+                if scene_info.running {
+                    resources.get::<RapierIntegration>().step(world);
+                }
             }
 
             _ => {}
