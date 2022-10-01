@@ -61,6 +61,11 @@ impl RapierIntegration {
     }
 
     pub fn step(&mut self, world: &mut World) {
+        self.query_pipeline.update(
+            &self.island_manager,
+            &self.rigid_body_set,
+            &self.collider_set,
+        );
         let mut to_despawn = Vec::new();
         for collider in self.collider_set.iter() {
             if collider.1.user_data != 0 {
@@ -618,7 +623,8 @@ fn main() {
                             &rapier_integration.rigid_body_set,
                             &rapier_integration.collider_set,
                             &point![pointer_position.x, pointer_position.y],
-                            QueryFilter::default(),
+                            QueryFilter::default()
+                                .predicate(&|_, c: &Collider| c.parent().is_some()),
                             |handle| {
                                 let collider = rapier_integration.collider_set.get(handle).unwrap();
                                 if collider.user_data != 0 {
