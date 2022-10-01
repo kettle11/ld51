@@ -1,4 +1,4 @@
-use koi3::*;
+use koi3::{scripts::CameraControls, *};
 use rapier2d::prelude::*;
 
 struct RapierRigidBody {
@@ -97,6 +97,11 @@ impl RapierIntegration {
                 let new_p: [f32; 2] = transform.position.xy().into();
                 body.set_translation(new_p.into(), true);
             }
+
+            let angle = transform.rotation.to_angle_axis().0;
+            if body.rotation().angle() != angle {
+                body.set_rotation(angle, true);
+            }
         }
 
         let gravity: [f32; 2] = self.gravity.into();
@@ -154,15 +159,27 @@ impl SceneInfo {
 }
 
 pub fn setup(world: &mut World, resources: &mut Resources) {
-    let materials = {
+    let materials: Vec<Handle<Material>> = {
         let mut material_store = resources.get::<AssetStore<Material>>();
-        let mut materials = Vec::new();
-        materials.push(material_store.add(Material {
-            base_color: Color::RED,
-            shader: Shader::UNLIT,
-            ..Default::default()
-        }));
-        materials
+
+        [
+            material_store.add(Material {
+                base_color: Color::RED,
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+            material_store.add(Material {
+                base_color: Color::GREEN,
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+            material_store.add(Material {
+                base_color: Color::YELLOW.with_chroma(0.2),
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+        ]
+        .into()
     };
 
     world.clear();
@@ -171,13 +188,16 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         Transform::new(),
         Camera {
             clear_color: Some(Color::CORNFLOWER_BLUE),
+
             projection_mode: ProjectionMode::Orthographic {
                 height: 10.0,
                 z_near: -1.0,
                 z_far: 2.0,
             },
+
             ..Default::default()
         },
+        CameraControls::default(),
     ));
 
     let mut rapier_integration = RapierIntegration::new();
@@ -192,7 +212,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 
     world.spawn((
         Transform::new().with_position(Vec3::Y * 3.0),
-        Mesh::SPHERE,
+        Mesh::VERTICAL_CIRCLE,
         Material::UNLIT,
         rapier_handle,
     ));
@@ -203,26 +223,17 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     );
     world.spawn((
         Transform::new().with_position(Vec3::Y * 1.0),
-        Mesh::SPHERE,
+        Mesh::VERTICAL_CIRCLE,
         Material::UNLIT,
         rapier_handle,
     ));
 
     */
 
-    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
-        RigidBodyBuilder::kinematic_position_based().build(),
-        ColliderBuilder::cuboid(0.5, 0.5).restitution(0.7).build(),
-    );
-    world.spawn((
-        Transform::new()
-            .with_position(Vec3::Y * 2.0 + Vec3::Z * 0.1)
-            .with_rotation(Quat::from_angle_axis(0.9, Vec3::Z)),
-        Mesh::VERTICAL_QUAD,
-        materials[0].clone(),
-        Cannon { timer: 0.0 },
-        rapier_handle,
-    ));
+    create_cannon(world, &mut rapier_integration, &materials);
+
+    create_victory_orb(world, &mut rapier_integration, &materials, -Vec3::X * 4.0);
+    create_laser(world, &mut rapier_integration, &materials, -Vec3::X * 1.0);
 
     resources.add(rapier_integration);
     resources.add(SceneInfo {
@@ -233,8 +244,248 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     });
 }
 
-struct Cannon {
-    timer: f32,
+struct VictoryOrb {
+    power: f32,
+    child: Entity,
+}
+
+struct Particle {}
+
+fn run_victory_orb(world: &mut World, resources: &mut Resources) {
+    let time = resources.get::<Time>();
+    let mut rapier_integration = resources.get::<RapierIntegration>();
+
+    let mut to_despawn = Vec::new();
+
+    for (e, (transform, victory_orb)) in world.query::<(&Transform, &mut VictoryOrb)>().iter() {
+        let collider = world.get::<&RapierRigidBody>(e).unwrap();
+        for contact_pair in rapier_integration
+            .narrow_phase
+            .contacts_with(collider.collider_handle)
+        {
+            let other_collider = if contact_pair.collider1 == collider.collider_handle {
+                contact_pair.collider2
+            } else {
+                contact_pair.collider1
+            };
+
+            let user_data = rapier_integration
+                .collider_set
+                .get(other_collider)
+                .unwrap()
+                .user_data;
+
+            if user_data != 0 {
+                let entity = Entity::from_bits(user_data as _).unwrap();
+                if world.get::<&Particle>(entity).is_ok() {
+                    println!("CONTACT WITH VICTORY ORB: {:?}", contact_pair.collider2);
+                    to_despawn.push(entity);
+                    victory_orb.power += 0.1;
+                    if victory_orb.power > 1.0 {
+                        victory_orb.power = 1.0;
+                        println!("WIN CONDITION");
+                    }
+                }
+            }
+        }
+
+        world
+            .get::<&mut Transform>(victory_orb.child)
+            .unwrap()
+            .scale = Vec3::fill(victory_orb.power);
+    }
+    for e in to_despawn {
+        let _ = world.despawn(e);
+    }
+}
+
+fn create_victory_orb(
+    world: &mut World,
+    rapier_integration: &mut RapierIntegration,
+    materials: &[Handle<Material>],
+    position: Vec3,
+) {
+    let scale = 2.0;
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::cuboid(0.5 * scale, 0.5 * scale)
+            .restitution(0.7)
+            .build(),
+    );
+
+    let child = world.spawn((
+        Transform::new()
+            .with_scale(Vec3::fill(1.2))
+            .with_position(Vec3::Z * 0.2),
+        Mesh::VERTICAL_CIRCLE,
+        materials[2].clone(),
+    ));
+
+    let parent = world.spawn((
+        Transform::new()
+            .with_position(position)
+            .with_scale(Vec3::fill(scale)),
+        Mesh::VERTICAL_CIRCLE,
+        materials[1].clone(),
+        rapier_handle,
+        VictoryOrb { power: 0.2, child },
+    ));
+
+    world.set_parent(parent, child).unwrap();
+}
+
+struct Laser;
+
+struct Activated(bool);
+
+struct ActivateOnTimer {
+    current: f32,
+    frequency: f32, // Every 10.0 seconds
+}
+
+fn run_activate_on_timer(world: &mut World, resources: &mut Resources) {
+    let time = resources.get::<Time>();
+
+    for (_, (timer, activated)) in world
+        .query::<(&mut ActivateOnTimer, &mut Activated)>()
+        .iter()
+    {
+        activated.0 = true;
+
+        timer.current -= time.fixed_time_step_seconds as f32;
+        if timer.current < 0.0 {
+            timer.current = timer.frequency;
+            activated.0 = true;
+        } else {
+            activated.0 = false;
+        }
+    }
+}
+
+fn create_laser(
+    world: &mut World,
+    rapier_integration: &mut RapierIntegration,
+    materials: &[Handle<Material>],
+    position: Vec3,
+) {
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::cuboid(0.5, 0.5)
+            .restitution(0.7)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .build(),
+    );
+    world.spawn((
+        Transform::new()
+            .with_position(position + Vec3::Z * 0.1)
+            .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
+        Mesh::VERTICAL_QUAD,
+        materials[2].clone(),
+        Laser,
+        Activated(false),
+        ActivateOnTimer {
+            current: 0.0,
+            frequency: 10.0, // Every 10 seconds!
+        },
+        rapier_handle,
+    ));
+}
+
+fn run_laser(world: &mut World, resources: &mut Resources) {
+    let rapier_integration = resources.get::<RapierIntegration>();
+
+    let mut to_spawn = Vec::new();
+
+    for (_, (transform, _laser, rigid_body, activated)) in world
+        .query::<(&GlobalTransform, &mut Laser, &RapierRigidBody, &Activated)>()
+        .iter()
+    {
+        if activated.0 {
+            println!("ACTIVATE LASER!");
+            let direction = transform.right().xy().normalized();
+            let ray = Ray::new(
+                point![transform.position.x, transform.position.y],
+                vector![direction.x, direction.y],
+            );
+
+            if let Some((collider_handle, intersection)) =
+                rapier_integration.query_pipeline.cast_ray_and_get_normal(
+                    &rapier_integration.rigid_body_set,
+                    &rapier_integration.collider_set,
+                    &ray,
+                    1000.0,
+                    true,
+                    QueryFilter::new().exclude_rigid_body(rigid_body.rigid_body_handle),
+                )
+            {
+                let hit_point = ray.point_at(intersection.toi);
+                let hit_normal = intersection.normal;
+
+                let collider = rapier_integration
+                    .collider_set
+                    .get(collider_handle)
+                    .unwrap();
+                if collider.user_data != 0 {
+                    let entity = Entity::from_bits(collider.user_data as _).unwrap();
+                    if let Ok(mut activated) = world.get::<&mut Activated>(entity) {
+                        activated.0 = true;
+                    }
+                }
+
+                to_spawn.push((transform.position.xy(), Vec2::new(hit_point.x, hit_point.y)));
+            } else {
+                to_spawn.push((
+                    transform.position.xy(),
+                    transform.position.xy() + direction * 100.0,
+                ));
+            }
+        }
+    }
+
+    for (start, end) in to_spawn {
+        let diff = end - start;
+        let diff_normalized = diff.normalized();
+        let middle = (end - start) / 2.0 + start;
+
+        world.spawn((
+            Transform::new()
+                .with_position(middle.extend(0.0))
+                .with_scale(Vec3::new(diff.length(), 0.1, 1.0))
+                .with_rotation(Quat::from_forward_up(
+                    -Vec3::Z,
+                    Vec3::new(diff_normalized.y, -diff_normalized.x, 0.0),
+                )),
+            Mesh::VERTICAL_QUAD,
+            Material::UNLIT,
+            Ephemeral(0.5),
+        ));
+    }
+}
+
+struct Cannon;
+
+fn create_cannon(
+    world: &mut World,
+    rapier_integration: &mut RapierIntegration,
+    materials: &[Handle<Material>],
+) {
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::cuboid(0.5, 0.5)
+            .restitution(0.7)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .build(),
+    );
+    world.spawn((
+        Transform::new()
+            .with_position(Vec3::Y * 2.0 + Vec3::Z * 0.1)
+            .with_rotation(Quat::from_angle_axis(0.9, Vec3::Z)),
+        Mesh::VERTICAL_QUAD,
+        materials[0].clone(),
+        Cannon,
+        Activated(false),
+        rapier_handle,
+    ));
 }
 
 fn run_cannon(world: &mut World, resources: &mut Resources) {
@@ -242,11 +493,13 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
     let mut rapier_integration = resources.get::<RapierIntegration>();
 
     let mut to_spawn = Vec::new();
-    for (_, (transform, cannon)) in world.query::<(&Transform, &mut Cannon)>().iter() {
-        cannon.timer -= time.fixed_time_step_seconds as f32;
-        if cannon.timer < 0.0 {
+    for (_, (transform, cannon, activated)) in world
+        .query::<(&Transform, &mut Cannon, &Activated)>()
+        .iter()
+    {
+        //  cannon.timer -= time.fixed_time_step_seconds as f32;
+        if activated.0 {
             to_spawn.push((transform.clone(), transform.right().xy() * 5.0));
-            cannon.timer = 0.5;
         }
     }
 
@@ -260,10 +513,27 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
         world.spawn((
             t.clone()
                 .with_position(t.position + v.extend(0.0) * t.scale.max_component() * 0.1),
-            Mesh::SPHERE,
+            Mesh::VERTICAL_CIRCLE,
             Material::UNLIT,
             rapier_handle,
+            Particle {},
         ));
+    }
+}
+
+struct Ephemeral(f32);
+
+pub fn run_ephemeral(world: &mut World, time: &Time) {
+    let mut to_despawn = Vec::new();
+    for (e, ephermal) in world.query::<With<&mut Ephemeral, ()>>().iter() {
+        ephermal.0 -= time.draw_delta_seconds as f32;
+        if ephermal.0 < 0.0 {
+            to_despawn.push(e);
+        }
+    }
+
+    for e in to_despawn {
+        world.despawn(e).unwrap();
     }
 }
 
@@ -272,6 +542,9 @@ fn main() {
         setup(world, resources);
 
         move |event, world, resources| match event {
+            Event::Draw => {
+                run_ephemeral(world, &*resources.get::<Time>());
+            }
             Event::FixedUpdate => {
                 {
                     let key_pressed = resources.get::<Input>().key_down(Key::R);
@@ -367,7 +640,14 @@ fn main() {
                 }
 
                 if resources.get::<SceneInfo>().running {
+                    for (_, activated) in world.query::<&mut Activated>().iter() {
+                        activated.0 = false;
+                    }
+
+                    run_activate_on_timer(world, resources);
+                    run_laser(world, resources);
                     run_cannon(world, resources);
+                    run_victory_orb(world, resources);
                     resources.get::<RapierIntegration>().step(world);
                 }
             }
