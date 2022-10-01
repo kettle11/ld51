@@ -123,7 +123,7 @@ impl RapierIntegration {
             let p: [f32; 2] = body.position().translation.into();
             let r: f32 = body.rotation().angle();
 
-            transform.position = Vec3::new(p[0], p[1], 0.0);
+            transform.position = Vec3::new(p[0], p[1], transform.position.z);
             transform.rotation = Quat::from_angle_axis(r, Vec3::Z);
         }
 
@@ -139,24 +139,32 @@ struct SceneInfo {
     moving_entity: Option<Entity>,
     moving_offset: Vec2,
     running: bool,
+    materials: Vec<Handle<Material>>,
 }
 
 impl SceneInfo {
-    pub fn new() -> Self {
+    pub fn new(materials: Vec<Handle<Material>>) -> Self {
         Self {
             moving_entity: None,
             moving_offset: Vec2::ZERO,
             running: true,
+            materials,
         }
     }
 }
 
 pub fn setup(world: &mut World, resources: &mut Resources) {
-    resources.add(SceneInfo {
-        moving_entity: None,
-        moving_offset: Vec2::ZERO,
-        running: true,
-    });
+    let materials = {
+        let mut material_store = resources.get::<AssetStore<Material>>();
+        let mut materials = Vec::new();
+        materials.push(material_store.add(Material {
+            base_color: Color::RED,
+            shader: Shader::UNLIT,
+            ..Default::default()
+        }));
+        materials
+    };
+
     world.clear();
 
     world.spawn((
@@ -208,15 +216,21 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     );
     world.spawn((
         Transform::new()
-            .with_position(Vec3::Y * 2.0)
+            .with_position(Vec3::Y * 2.0 + Vec3::Z * 0.1)
             .with_rotation(Quat::from_angle_axis(0.9, Vec3::Z)),
         Mesh::VERTICAL_QUAD,
-        Material::UNLIT,
+        materials[0].clone(),
         Cannon { timer: 0.0 },
         rapier_handle,
     ));
 
     resources.add(rapier_integration);
+    resources.add(SceneInfo {
+        moving_entity: None,
+        moving_offset: Vec2::ZERO,
+        running: true,
+        materials,
+    });
 }
 
 struct Cannon {
