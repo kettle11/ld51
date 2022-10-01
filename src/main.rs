@@ -121,7 +121,10 @@ impl RapierIntegration {
         {
             let body = &self.rigid_body_set[rigid_body.rigid_body_handle];
             let p: [f32; 2] = body.position().translation.into();
+            let r: f32 = body.rotation().angle();
+
             transform.position = Vec3::new(p[0], p[1], 0.0);
+            transform.rotation = Quat::from_angle_axis(r, Vec3::Z);
         }
 
         self.query_pipeline.update(
@@ -172,10 +175,13 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     let mut rapier_integration = RapierIntegration::new();
     rapier_integration.add_collider(ColliderBuilder::cuboid(100.0, 0.1).build());
 
+    /*
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::dynamic().build(),
         ColliderBuilder::ball(0.5).restitution(0.7).build(),
     );
+
+
     world.spawn((
         Transform::new().with_position(Vec3::Y * 3.0),
         Mesh::SPHERE,
@@ -194,7 +200,57 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         rapier_handle,
     ));
 
+    */
+
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::cuboid(0.5, 0.5).restitution(0.7).build(),
+    );
+    world.spawn((
+        Transform::new()
+            .with_position(Vec3::Y * 2.0)
+            .with_rotation(Quat::from_angle_axis(0.9, Vec3::Z)),
+        Mesh::VERTICAL_QUAD,
+        Material::UNLIT,
+        Cannon { timer: 0.0 },
+        rapier_handle,
+    ));
+
     resources.add(rapier_integration);
+}
+
+struct Cannon {
+    timer: f32,
+}
+
+fn run_cannon(world: &mut World, resources: &mut Resources) {
+    let time = resources.get::<Time>();
+    let mut rapier_integration = resources.get::<RapierIntegration>();
+
+    let mut to_spawn = Vec::new();
+    for (_, (transform, cannon)) in world.query::<(&Transform, &mut Cannon)>().iter() {
+        cannon.timer -= time.fixed_time_step_seconds as f32;
+        if cannon.timer < 0.0 {
+            to_spawn.push((transform.clone(), transform.right().xy() * 5.0));
+            cannon.timer = 0.5;
+        }
+    }
+
+    for (t, v) in to_spawn {
+        let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+            RigidBodyBuilder::dynamic()
+                .linvel([v.x, v.y].into())
+                .build(),
+            ColliderBuilder::ball(0.5).restitution(0.7).build(),
+        );
+        world.spawn((
+            t.clone()
+                .with_position(t.position + v.extend(0.0) * t.scale.max_component() * 0.1),
+            Mesh::SPHERE,
+            Material::UNLIT,
+            rapier_handle,
+        ));
+    }
 }
 
 fn main() {
@@ -209,9 +265,9 @@ fn main() {
                         setup(world, resources);
                     }
                 }
-                let input = resources.get::<Input>();
 
                 {
+                    let input = resources.get::<Input>();
                     let mut rapier_integration = resources.get::<RapierIntegration>();
                     let mut scene_info = resources.get::<SceneInfo>();
 
@@ -277,22 +333,27 @@ fn main() {
                             &point![pointer_position.x, pointer_position.y],
                             QueryFilter::default(),
                             |handle| {
-                                println!("INTERSECTED WITH: {:?}", handle);
                                 let collider = rapier_integration.collider_set.get(handle).unwrap();
-                                let entity = Entity::from_bits(collider.user_data as _).unwrap();
-                                scene_info.moving_offset = pointer_position
-                                    - world.get::<&mut Transform>(entity).unwrap().position.xy();
+                                if collider.user_data != 0 {
+                                    let entity =
+                                        Entity::from_bits(collider.user_data as _).unwrap();
+                                    scene_info.moving_offset = pointer_position
+                                        - world
+                                            .get::<&mut Transform>(entity)
+                                            .unwrap()
+                                            .position
+                                            .xy();
 
-                                scene_info.moving_entity = Some(entity);
+                                    scene_info.moving_entity = Some(entity);
+                                }
                                 false
                             },
                         );
                     }
                 }
 
-                let mut scene_info = resources.get::<SceneInfo>();
-
-                if scene_info.running {
+                if resources.get::<SceneInfo>().running {
+                    run_cannon(world, resources);
                     resources.get::<RapierIntegration>().step(world);
                 }
             }
