@@ -65,13 +65,7 @@ impl RapierIntegration {
         }
     }
 
-    pub fn step(&mut self, world: &mut World) {
-        self.query_pipeline.update(
-            &self.island_manager,
-            &self.rigid_body_set,
-            &self.collider_set,
-        );
-
+    pub fn update_colliders(&mut self, world: &mut World) {
         let mut entities_to_despawn = Vec::new();
         // If the collider has been moved manually
         for (e, (transform, rigid_body)) in
@@ -126,6 +120,9 @@ impl RapierIntegration {
                 true,
             );
         }
+    }
+    pub fn step(&mut self, world: &mut World) {
+        self.update_colliders(world);
 
         let gravity: [f32; 2] = self.gravity.into();
         let gravity = gravity.into();
@@ -305,15 +302,6 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
             &scene_info,
             &meshes,
         );
-
-        create_splitter(
-            world,
-            &scene_info,
-            &mut meshes,
-            &mut rapier_integration,
-            &scene_info.materials,
-            Transform::new(),
-        );
     }
 
     resources.add(rapier_integration);
@@ -332,6 +320,7 @@ enum Gift {
     Cannon,
     Chunk,
     Laser,
+    Splitter,
 }
 
 struct Particle {}
@@ -411,6 +400,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
         let _ = world.remove_one::<Particle>(e);
     }
 
+    let meshes = resources.get::<AssetStore<Mesh>>();
     for (transform, e) in to_explode {
         let transform = transform.with_scale(Vec3::fill(1.0));
         let _ = world.insert(e, (Ephemeral(0.2),));
@@ -435,6 +425,13 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
                     world,
                     &mut rapier_integration,
                     &scene_info.materials,
+                    transform,
+                ),
+                Gift::Splitter => create_splitter(
+                    world,
+                    &scene_info,
+                    &meshes,
+                    &mut rapier_integration,
                     transform,
                 ),
             }
@@ -472,7 +469,7 @@ fn create_victory_orb(
             health: 2,
             full_health: 2,
             child,
-            gifts: vec![Gift::Cannon],
+            gifts: vec![Gift::Splitter],
         },
         Movable,
     ));
@@ -779,7 +776,6 @@ fn create_splitter(
     scene_info: &SceneInfo,
     meshes: &AssetStore<Mesh>,
     rapier_integration: &mut RapierIntegration,
-    materials: &Materials,
     transform: Transform,
 ) {
     let mesh = meshes.get(&scene_info.splitter_mesh);
@@ -800,7 +796,7 @@ fn create_splitter(
     let visuals = world.spawn((
         Transform::new(),
         scene_info.splitter_mesh.clone(),
-        materials.laser.clone(),
+        scene_info.materials.laser.clone(),
     ));
 
     let parent = world.spawn((
@@ -1037,14 +1033,7 @@ fn deserialize_world(
             Some("c") => create_cannon(world, rapier_integration, materials, transform),
             Some("v") => create_victory_orb(world, rapier_integration, materials, transform),
             Some("b") => create_environment_chunk(world, rapier_integration, materials, transform),
-            Some("s") => create_splitter(
-                world,
-                scene_info,
-                meshes,
-                rapier_integration,
-                materials,
-                transform,
-            ),
+            Some("s") => create_splitter(world, scene_info, meshes, rapier_integration, transform),
 
             Some(_) => {
                 panic!()
@@ -1052,6 +1041,14 @@ fn deserialize_world(
             None => {}
         }
     }
+}
+
+fn save_level(world: &mut World) {
+    // Save the level when editing.
+    let level = serialize_world(world);
+    klog::log!("SAVING LEVEL");
+    klog::log!("{}", level);
+    std::fs::write("src/level.txt", level.as_bytes()).unwrap();
 }
 
 fn main() {
@@ -1122,8 +1119,9 @@ fn main() {
                     }
                     Event::FixedUpdate => {
                         {
-                            if resources.get::<Input>().key_down(Key::L) {
+                            if resources.get::<Input>().key_down(Key::E) {
                                 setup(world, resources);
+                                return;
                             }
 
                             #[cfg(debug_assertions)]
@@ -1140,38 +1138,53 @@ fn main() {
                                 let mut rapier_integration = resources.get::<RapierIntegration>();
                                 let mut scene_info = resources.get::<SceneInfo>();
 
-                                if resources.get::<Input>().key_down(Key::Backspace) {
-                                    if let Some(moving_entity) = scene_info.moving_entity {
-                                        world.despawn(moving_entity).unwrap();
-                                        scene_info.moving_entity = None;
+                                if !scene_info.running {
+                                    if resources.get::<Input>().key_down(Key::Backspace) {
+                                        if let Some(moving_entity) = scene_info.moving_entity {
+                                            world.despawn(moving_entity).unwrap();
+                                            scene_info.moving_entity = None;
+
+                                            #[cfg(debug_assertions)]
+                                            if !scene_info.running {
+                                                println!("STEPPING");
+                                                rapier_integration.step(world);
+
+                                                save_level(world);
+                                            }
+                                        }
                                     }
-                                }
 
-                                if resources.get::<Input>().key_down(Key::A) {
-                                    scene_info.screen_shake_amount += 0.05;
-                                }
-
-                                if resources.get::<Input>().key(Key::R) {
-                                    if let Some(moving_entity) = scene_info.moving_entity {
-                                        let rotation = &mut world
-                                            .get::<&mut Transform>(moving_entity)
-                                            .unwrap()
-                                            .rotation;
-                                        *rotation = *rotation
-                                            * Quat::from_angle_axis(
-                                                resources.get::<Input>().scroll().1 as f32 * 0.05,
-                                                Vec3::Z,
-                                            );
+                                    if resources.get::<Input>().key(Key::R) {
+                                        if let Some(moving_entity) = scene_info.moving_entity {
+                                            {
+                                                let rotation = &mut world
+                                                    .get::<&mut Transform>(moving_entity)
+                                                    .unwrap()
+                                                    .rotation;
+                                                *rotation = *rotation
+                                                    * Quat::from_angle_axis(
+                                                        resources.get::<Input>().scroll().1 as f32
+                                                            * 0.05,
+                                                        Vec3::Z,
+                                                    );
+                                            }
+                                            #[cfg(debug_assertions)]
+                                            if !scene_info.running {
+                                                println!("STEPPING");
+                                                rapier_integration.step(world);
+                                                save_level(world);
+                                            }
+                                        }
                                     }
-                                }
 
-                                if resources.get::<Input>().key_down(Key::B) {
-                                    create_environment_chunk(
-                                        world,
-                                        &mut rapier_integration,
-                                        &scene_info.materials,
-                                        Transform::new(),
-                                    );
+                                    if resources.get::<Input>().key_down(Key::B) {
+                                        create_environment_chunk(
+                                            world,
+                                            &mut rapier_integration,
+                                            &scene_info.materials,
+                                            Transform::new(),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1198,6 +1211,13 @@ fn main() {
                                         .unwrap();
 
                                     rigid_body_handle.set_gravity_scale(1.0, false);
+
+                                    #[cfg(debug_assertions)]
+                                    if !scene_info.running {
+                                        println!("STEPPING");
+                                        rapier_integration.step(world);
+                                        save_level(world);
+                                    }
                                 }
                                 scene_info.moving_entity = None;
                             }
