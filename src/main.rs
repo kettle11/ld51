@@ -1,5 +1,8 @@
-use koi3::{scripts::CameraControls, *};
+use camera_controls::CameraControls;
+use koi3::*;
 use rapier2d::prelude::*;
+
+mod camera_controls;
 
 struct RapierRigidBody {
     rigid_body_handle: rapier2d::prelude::RigidBodyHandle,
@@ -202,8 +205,6 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 
     world.clear();
 
-    let camera_parent = world.spawn((Transform::new(),));
-
     let screen_ui = world.spawn((
         Transform::new(),
         PoweredUpBar,
@@ -224,8 +225,9 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 
             ..Default::default()
         },
-        // CameraControls::default(),
     ));
+    let camera_parent = world.spawn((Transform::new(), CameraControls::new(camera)));
+
     world.set_parent(camera, screen_ui).unwrap();
     world.set_parent(camera_parent, camera).unwrap();
 
@@ -828,116 +830,163 @@ fn main() {
             ..Default::default()
         })
         .setup_and_run(|world, resources| {
+            camera_controls::initialize_plugin(resources);
+
             setup(world, resources);
 
             let mut random = Random::new();
 
-            move |event, world, resources| match event {
-                Event::Draw => {
-                    run_shake_child(world, resources);
+            move |event, world, resources| {
+                koi3::transform_plugin::update_global_transforms(event, world, resources);
+                match event {
+                    Event::Draw => {
+                        run_shake_child(world, resources);
 
-                    let mut scene_info = resources.get::<SceneInfo>();
-                    let screen_shake_amount = &mut scene_info.screen_shake_amount;
-                    let screen_shake = Vec2::new(
-                        random.range_f32(-*screen_shake_amount..*screen_shake_amount),
-                        random.range_f32(-*screen_shake_amount..*screen_shake_amount),
-                    );
+                        let mut scene_info = resources.get::<SceneInfo>();
+                        let screen_shake_amount = &mut scene_info.screen_shake_amount;
+                        let screen_shake = Vec2::new(
+                            random.range_f32(-*screen_shake_amount..*screen_shake_amount),
+                            random.range_f32(-*screen_shake_amount..*screen_shake_amount),
+                        );
 
-                    let mut q = world.query::<(&mut Transform, &Camera)>();
-                    let mut iter = q.iter();
-                    let (camera_transform, camera) = iter.next().unwrap().1;
-                    camera_transform.position = screen_shake.extend(camera_transform.position.z);
-                    *screen_shake_amount *= 0.94;
+                        let mut q = world.query::<(&mut Transform, &Camera)>();
+                        let mut iter = q.iter();
+                        let (camera_transform, camera) = iter.next().unwrap().1;
+                        camera_transform.position =
+                            screen_shake.extend(camera_transform.position.z);
+                        *screen_shake_amount *= 0.94;
 
-                    // Handle the powered up meter
-                    {
-                        let total_power: f32 =
-                            world.query::<&VictoryOrb>().iter().map(|v| v.1.power).sum();
-
-                        let percent_of_max_power = total_power / scene_info.max_power;
-                        let mut q = world.query::<(&mut Transform, &PoweredUpBar)>();
-                        let mut i = q.iter();
-                        let powered_up_bar = i.next().unwrap().1 .0;
-
-                        let camera_height = match camera.projection_mode {
-                            ProjectionMode::Orthographic { height, .. } => height,
-                            _ => unimplemented!(),
-                        };
-
-                        let view_size = resources.get::<kapp::Window>().size();
-                        let aspect_ratio = view_size.1 as f32 / view_size.0 as f32;
-                        let camera_width_world_space = camera_height * aspect_ratio;
-                        powered_up_bar.scale.x = camera_width_world_space * percent_of_max_power;
-                        powered_up_bar.scale.y = 0.5;
-                        powered_up_bar.position.y =
-                            -camera_height / 2.0 + powered_up_bar.scale.y * 0.5;
-                    }
-                }
-                Event::FixedUpdate => {
-                    {
-                        if resources.get::<Input>().key_down(Key::L) {
-                            setup(world, resources);
-                        }
-
-                        #[cfg(debug_assertions)]
+                        // Handle the powered up meter
                         {
-                            if resources.get::<Input>().key_down(Key::S) {
-                                let level = serialize_world(world);
-                                klog::log!("SAVING LEVEL");
-                                klog::log!("{}", level);
-                                std::fs::write("src/level.txt", level.as_bytes()).unwrap();
+                            let total_power: f32 =
+                                world.query::<&VictoryOrb>().iter().map(|v| v.1.power).sum();
+
+                            let percent_of_max_power = total_power / scene_info.max_power;
+                            let mut q = world.query::<(&mut Transform, &PoweredUpBar)>();
+                            let mut i = q.iter();
+                            let powered_up_bar = i.next().unwrap().1 .0;
+
+                            let camera_height = match camera.projection_mode {
+                                ProjectionMode::Orthographic { height, .. } => height,
+                                _ => unimplemented!(),
+                            };
+
+                            let view_size = resources.get::<kapp::Window>().size();
+                            let aspect_ratio = view_size.1 as f32 / view_size.0 as f32;
+                            let camera_width_world_space = camera_height * aspect_ratio;
+                            powered_up_bar.scale.x =
+                                camera_width_world_space * percent_of_max_power;
+                            powered_up_bar.scale.y = 0.5;
+                            powered_up_bar.position.y =
+                                -camera_height / 2.0 + powered_up_bar.scale.y * 0.5;
+                        }
+                    }
+                    Event::FixedUpdate => {
+                        {
+                            if resources.get::<Input>().key_down(Key::L) {
+                                setup(world, resources);
                             }
 
+                            #[cfg(debug_assertions)]
+                            {
+                                /*
+                                if resources.get::<Input>().key_down(Key::S) {
+                                    let level = serialize_world(world);
+                                    klog::log!("SAVING LEVEL");
+                                    klog::log!("{}", level);
+                                    std::fs::write("src/level.txt", level.as_bytes()).unwrap();
+                                }
+                                */
+
+                                let mut rapier_integration = resources.get::<RapierIntegration>();
+                                let mut scene_info = resources.get::<SceneInfo>();
+
+                                if resources.get::<Input>().key_down(Key::Backspace) {
+                                    if let Some(moving_entity) = scene_info.moving_entity {
+                                        world.despawn(moving_entity).unwrap();
+                                        scene_info.moving_entity = None;
+                                    }
+                                }
+
+                                if resources.get::<Input>().key_down(Key::A) {
+                                    scene_info.screen_shake_amount += 0.05;
+                                }
+
+                                if resources.get::<Input>().key(Key::R) {
+                                    if let Some(moving_entity) = scene_info.moving_entity {
+                                        let rotation = &mut world
+                                            .get::<&mut Transform>(moving_entity)
+                                            .unwrap()
+                                            .rotation;
+                                        *rotation = *rotation
+                                            * Quat::from_angle_axis(
+                                                resources.get::<Input>().scroll().1 as f32 * 0.05,
+                                                Vec3::Z,
+                                            );
+                                    }
+                                }
+
+                                if resources.get::<Input>().key_down(Key::B) {
+                                    create_environment_chunk(
+                                        world,
+                                        &mut rapier_integration,
+                                        &scene_info.materials,
+                                        Transform::new(),
+                                    );
+                                }
+                            }
+                        }
+
+                        {
+                            let input = resources.get::<Input>();
                             let mut rapier_integration = resources.get::<RapierIntegration>();
                             let mut scene_info = resources.get::<SceneInfo>();
 
-                            if resources.get::<Input>().key_down(Key::Backspace) {
+                            if input.key_down(Key::P) {
+                                scene_info.running = !scene_info.running;
+                            }
+
+                            if input.pointer_button_released(PointerButton::Primary) {
                                 if let Some(moving_entity) = scene_info.moving_entity {
-                                    world.despawn(moving_entity).unwrap();
-                                    scene_info.moving_entity = None;
+                                    let rigid_body_handle = rapier_integration
+                                        .rigid_body_set
+                                        .get_mut(
+                                            world
+                                                .get::<&mut RapierRigidBody>(moving_entity)
+                                                .unwrap()
+                                                .rigid_body_handle,
+                                        )
+                                        .unwrap();
+
+                                    rigid_body_handle.set_gravity_scale(1.0, false);
                                 }
+                                scene_info.moving_entity = None;
                             }
 
-                            if resources.get::<Input>().key_down(Key::A) {
-                                scene_info.screen_shake_amount += 0.05;
-                            }
+                            let pointer_position = {
+                                let (x, y) = input.pointer_position();
+                                let mut q = world.query::<(&mut GlobalTransform, &Camera)>();
+                                let mut iter = q.iter();
+                                let (camera_transform, camera) = iter.next().unwrap().1;
 
-                            if resources.get::<Input>().key(Key::R) {
-                                if let Some(moving_entity) = scene_info.moving_entity {
-                                    let rotation = &mut world
-                                        .get::<&mut Transform>(moving_entity)
-                                        .unwrap()
-                                        .rotation;
-                                    *rotation = *rotation
-                                        * Quat::from_angle_axis(
-                                            resources.get::<Input>().scroll().1 as f32 * 0.05,
-                                            Vec3::Z,
-                                        );
-                                }
-                            }
-
-                            if resources.get::<Input>().key_down(Key::B) {
-                                create_environment_chunk(
-                                    world,
-                                    &mut rapier_integration,
-                                    &scene_info.materials,
-                                    Transform::new(),
+                                let view_size = resources.get::<kapp::Window>().size();
+                                let ray = camera.view_to_ray(
+                                    camera_transform,
+                                    x as _,
+                                    y as _,
+                                    view_size.0 as _,
+                                    view_size.1 as _,
                                 );
-                            }
-                        }
-                    }
+                                ray.origin.xy()
+                            };
 
-                    {
-                        let input = resources.get::<Input>();
-                        let mut rapier_integration = resources.get::<RapierIntegration>();
-                        let mut scene_info = resources.get::<SceneInfo>();
-
-                        if input.key_down(Key::P) {
-                            scene_info.running = !scene_info.running;
-                        }
-
-                        if input.pointer_button_released(PointerButton::Primary) {
                             if let Some(moving_entity) = scene_info.moving_entity {
+                                let position = &mut world
+                                    .get::<&mut Transform>(moving_entity)
+                                    .unwrap()
+                                    .position;
+                                *position = (pointer_position - scene_info.moving_offset)
+                                    .extend(position.z);
                                 let rigid_body_handle = rapier_integration
                                     .rigid_body_set
                                     .get_mut(
@@ -947,133 +996,100 @@ fn main() {
                                             .rigid_body_handle,
                                     )
                                     .unwrap();
-
-                                rigid_body_handle.set_gravity_scale(1.0, false);
+                                rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
+                                rigid_body_handle.set_angvel(0.0, false);
+                                rigid_body_handle.set_gravity_scale(0.0, false);
                             }
-                            scene_info.moving_entity = None;
-                        }
 
-                        let pointer_position = {
-                            let (x, y) = input.pointer_position();
-                            let mut q = world.query::<(&Transform, &Camera)>();
-                            let mut iter = q.iter();
-                            let (camera_transform, camera) = iter.next().unwrap().1;
+                            if input.pointer_button_down(PointerButton::Primary) {
+                                rapier_integration.query_pipeline.intersections_with_point(
+                                    &rapier_integration.rigid_body_set,
+                                    &rapier_integration.collider_set,
+                                    &point![pointer_position.x, pointer_position.y],
+                                    QueryFilter::default()
+                                        .predicate(&|_, c: &Collider| c.parent().is_some()),
+                                    |handle| {
+                                        let collider =
+                                            rapier_integration.collider_set.get(handle).unwrap();
+                                        if collider.user_data != 0 {
+                                            let entity =
+                                                Entity::from_bits(collider.user_data as _).unwrap();
 
-                            let view_size = resources.get::<kapp::Window>().size();
-                            let ray = camera.view_to_ray(
-                                camera_transform,
-                                x as _,
-                                y as _,
-                                view_size.0 as _,
-                                view_size.1 as _,
-                            );
-                            ray.origin.xy()
-                        };
+                                            if world.get::<&Movable>(entity).is_ok() {
+                                                scene_info.moving_offset = pointer_position
+                                                    - world
+                                                        .get::<&mut Transform>(entity)
+                                                        .unwrap()
+                                                        .position
+                                                        .xy();
 
-                        if let Some(moving_entity) = scene_info.moving_entity {
-                            let position =
-                                &mut world.get::<&mut Transform>(moving_entity).unwrap().position;
-                            *position =
-                                (pointer_position - scene_info.moving_offset).extend(position.z);
-                            let rigid_body_handle = rapier_integration
-                                .rigid_body_set
-                                .get_mut(
-                                    world
-                                        .get::<&mut RapierRigidBody>(moving_entity)
-                                        .unwrap()
-                                        .rigid_body_handle,
-                                )
-                                .unwrap();
-                            rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
-                            rigid_body_handle.set_angvel(0.0, false);
-                            rigid_body_handle.set_gravity_scale(0.0, false);
-                        }
-
-                        if input.pointer_button_down(PointerButton::Primary) {
-                            rapier_integration.query_pipeline.intersections_with_point(
-                                &rapier_integration.rigid_body_set,
-                                &rapier_integration.collider_set,
-                                &point![pointer_position.x, pointer_position.y],
-                                QueryFilter::default()
-                                    .predicate(&|_, c: &Collider| c.parent().is_some()),
-                                |handle| {
-                                    let collider =
-                                        rapier_integration.collider_set.get(handle).unwrap();
-                                    if collider.user_data != 0 {
-                                        let entity =
-                                            Entity::from_bits(collider.user_data as _).unwrap();
-
-                                        if world.get::<&Movable>(entity).is_ok() {
-                                            scene_info.moving_offset = pointer_position
-                                                - world
-                                                    .get::<&mut Transform>(entity)
-                                                    .unwrap()
-                                                    .position
-                                                    .xy();
-
-                                            scene_info.moving_entity = Some(entity);
+                                                scene_info.moving_entity = Some(entity);
+                                            }
                                         }
+                                        false
+                                    },
+                                );
+                            }
+                        }
+
+                        if resources.get::<SceneInfo>().running {
+                            if resources.get::<SceneInfo>().freeze_time <= 0.0 {
+                                run_ephemeral(world, &*resources.get::<Time>());
+
+                                {
+                                    let time = resources.get::<Time>();
+
+                                    for (_, (chargable, activated)) in
+                                        world.query::<(&mut Chargable, &mut Activated)>().iter()
+                                    {
+                                        if chargable.charged {
+                                            chargable.charged = false;
+                                        } else {
+                                            chargable.amount -=
+                                                1.0 * time.fixed_time_step_seconds as f32;
+                                        }
+                                        if chargable.amount > 1.0 {
+                                            activated.this_frame = !activated.activated;
+                                            activated.activated = true;
+                                            if activated.reset_charge_on_activate {
+                                                chargable.amount = 0.0
+                                            }
+                                            //chargable.amount = 0.0;
+                                        } else {
+                                            activated.this_frame = false;
+                                            activated.activated = false;
+                                        }
+                                        chargable.amount = chargable.amount.clamp(0.0, 1.0);
                                     }
-                                    false
-                                },
-                            );
+
+                                    for (_, (chargable, scale_child_to_chargable)) in
+                                        world.query::<(&Chargable, &ScaleChildToChargable)>().iter()
+                                    {
+                                        world
+                                            .get::<&mut Transform>(scale_child_to_chargable.child)
+                                            .unwrap()
+                                            .scale = Vec3::fill(animation_curves::smooth_step(
+                                            chargable.amount,
+                                        ));
+                                    }
+                                }
+
+                                run_charge_on_timer(world, resources);
+                                run_laser(world, resources);
+                                run_cannon(world, resources);
+                                run_victory_orb(world, resources);
+
+                                resources.get::<RapierIntegration>().step(world);
+                            } else {
+                                resources.get::<SceneInfo>().freeze_time -=
+                                    resources.get::<Time>().fixed_time_step_seconds as f32;
+                            }
                         }
                     }
 
-                    if resources.get::<SceneInfo>().running {
-                        if resources.get::<SceneInfo>().freeze_time <= 0.0 {
-                            run_ephemeral(world, &*resources.get::<Time>());
-
-                            {
-                                let time = resources.get::<Time>();
-
-                                for (_, (chargable, activated)) in
-                                    world.query::<(&mut Chargable, &mut Activated)>().iter()
-                                {
-                                    if chargable.charged {
-                                        chargable.charged = false;
-                                    } else {
-                                        chargable.amount -=
-                                            1.0 * time.fixed_time_step_seconds as f32;
-                                    }
-                                    if chargable.amount > 1.0 {
-                                        activated.this_frame = !activated.activated;
-                                        activated.activated = true;
-                                        if activated.reset_charge_on_activate {
-                                            chargable.amount = 0.0
-                                        }
-                                        //chargable.amount = 0.0;
-                                    } else {
-                                        activated.this_frame = false;
-                                        activated.activated = false;
-                                    }
-                                    chargable.amount = chargable.amount.clamp(0.0, 1.0);
-                                }
-
-                                for (_, (chargable, scale_child_to_chargable)) in
-                                    world.query::<(&Chargable, &ScaleChildToChargable)>().iter()
-                                {
-                                    world
-                                        .get::<&mut Transform>(scale_child_to_chargable.child)
-                                        .unwrap()
-                                        .scale =
-                                        Vec3::fill(animation_curves::smooth_step(chargable.amount));
-                                }
-                            }
-
-                            run_charge_on_timer(world, resources);
-                            run_laser(world, resources);
-                            run_cannon(world, resources);
-                            run_victory_orb(world, resources);
-                            resources.get::<RapierIntegration>().step(world);
-                        } else {
-                            resources.get::<SceneInfo>().freeze_time -=
-                                resources.get::<Time>().fixed_time_step_seconds as f32;
-                        }
-                    }
+                    _ => {}
                 }
-
-                _ => {}
+                camera_controls::update_camera_controls(event, world, resources);
             }
         });
 }
