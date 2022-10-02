@@ -69,26 +69,6 @@ impl RapierIntegration {
             &self.rigid_body_set,
             &self.collider_set,
         );
-        let mut to_despawn = Vec::new();
-        for collider in self.collider_set.iter() {
-            if collider.1.user_data != 0 {
-                let entity = Entity::from_bits(collider.1.user_data as _).unwrap();
-                if !world.contains(entity) {
-                    to_despawn.push(collider.1.parent().unwrap());
-                }
-            }
-        }
-
-        for c in to_despawn {
-            self.rigid_body_set.remove(
-                c,
-                &mut self.island_manager,
-                &mut self.collider_set,
-                &mut self.impulse_joint_set,
-                &mut self.multibody_joint_set,
-                true,
-            );
-        }
 
         // If the collider has been moved manually
         for (e, (transform, rigid_body)) in
@@ -110,6 +90,29 @@ impl RapierIntegration {
             if body.rotation().angle() != angle {
                 body.set_rotation(angle, true);
             }
+        }
+
+        let mut to_despawn = Vec::new();
+        for collider in self.collider_set.iter() {
+            if collider.1.user_data != 0 {
+                let entity = Entity::from_bits(collider.1.user_data as _).unwrap();
+                if !world.contains(entity) {
+                    to_despawn.push(collider.1.parent().unwrap());
+                }
+            } else {
+                to_despawn.push(collider.1.parent().unwrap());
+            }
+        }
+
+        for c in to_despawn {
+            self.rigid_body_set.remove(
+                c,
+                &mut self.island_manager,
+                &mut self.collider_set,
+                &mut self.impulse_joint_set,
+                &mut self.multibody_joint_set,
+                true,
+            );
         }
 
         let gravity: [f32; 2] = self.gravity.into();
@@ -172,7 +175,7 @@ impl SceneInfo {
     }
 }
 
-struct PoweredUpBar;
+// struct PoweredUpBar;
 
 pub fn setup(world: &mut World, resources: &mut Resources) {
     let materials: Vec<Handle<Material>> = {
@@ -205,12 +208,14 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 
     world.clear();
 
+    /*
     let screen_ui = world.spawn((
         Transform::new(),
         PoweredUpBar,
         Mesh::VERTICAL_QUAD,
         Material::UNLIT,
     ));
+    */
 
     let camera = world.spawn((
         Transform::new(),
@@ -228,7 +233,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     ));
     let camera_parent = world.spawn((Transform::new(), CameraControls::new(camera)));
 
-    world.set_parent(camera, screen_ui).unwrap();
+    //world.set_parent(camera, screen_ui).unwrap();
     world.set_parent(camera_parent, camera).unwrap();
 
     let mut rapier_integration = RapierIntegration::new();
@@ -278,8 +283,16 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 }
 
 struct VictoryOrb {
-    power: f32,
+    health: usize,
+    full_health: usize,
     child: Entity,
+    gifts: Vec<Gift>,
+}
+
+enum Gift {
+    Cannon,
+    Chunk,
+    Laser,
 }
 
 struct Particle {}
@@ -291,9 +304,9 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
     let mut scene_info = resources.get::<SceneInfo>();
 
     let mut to_despawn = Vec::new();
-
+    let mut to_explode = Vec::new();
     for (e, (transform, victory_orb)) in world.query::<(&Transform, &mut VictoryOrb)>().iter() {
-        victory_orb.power -= 0.05 * time.fixed_time_step_seconds as f32;
+        //victory_orb.power -= 0.05 * time.fixed_time_step_seconds as f32;
 
         let collider = world.get::<&RapierRigidBody>(e).unwrap();
         for contact_pair in rapier_integration
@@ -315,30 +328,60 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
             if user_data != 0 {
                 let entity = Entity::from_bits(user_data as _).unwrap();
                 if world.get::<&Particle>(entity).is_ok() {
-                    println!("CONTACT WITH VICTORY ORB: {:?}", contact_pair.collider2);
                     to_despawn.push(entity);
-                    victory_orb.power += 0.1;
+                    victory_orb.health = victory_orb.health.saturating_sub(1);
                     scene_info.screen_shake_amount += 0.05;
-                    if victory_orb.power > 1.0 {
+                    if victory_orb.health == 0 {
                         scene_info.screen_shake_amount += 0.3;
 
                         scene_info.freeze_time = 1.0;
-                        println!("WIN CONDITION");
+                        to_explode.push((transform.clone(), e));
                     }
                 }
             }
         }
 
-        victory_orb.power = victory_orb.power.clamp(0.0, 1.0);
-
         world
             .get::<&mut Transform>(victory_orb.child)
             .unwrap()
-            .scale = Vec3::fill(victory_orb.power);
+            .scale = Vec3::fill(1.0 - (victory_orb.health as f32 / victory_orb.full_health as f32));
     }
     for e in to_despawn {
         let _ = world.insert(e, (Ephemeral(0.2),));
         let _ = world.remove_one::<Particle>(e);
+    }
+
+    for (transform, e) in to_explode {
+        let transform = transform.with_scale(Vec3::fill(1.0));
+        let _ = world.insert(e, (Ephemeral(0.2),));
+
+        let victory_orb = world.remove_one::<VictoryOrb>(e).unwrap();
+
+        for gift in victory_orb.gifts.iter() {
+            match gift {
+                Gift::Cannon => create_cannon(
+                    world,
+                    &mut rapier_integration,
+                    &scene_info.materials,
+                    transform,
+                ),
+                Gift::Chunk => create_environment_chunk(
+                    world,
+                    &mut rapier_integration,
+                    &scene_info.materials,
+                    transform,
+                ),
+                Gift::Laser => create_laser(
+                    world,
+                    &mut rapier_integration,
+                    &scene_info.materials,
+                    transform,
+                ),
+            }
+        }
+
+        // let _ = world.insert(e, (Ephemeral(0.2),));
+        // let _ = world.remove_one::<Particle>(e);
     }
 }
 
@@ -365,7 +408,12 @@ fn create_victory_orb(
         Mesh::VERTICAL_CIRCLE,
         materials[1].clone(),
         rapier_handle,
-        VictoryOrb { power: 0.2, child },
+        VictoryOrb {
+            health: 2,
+            full_health: 2,
+            child,
+            gifts: vec![Gift::Cannon],
+        },
         Movable,
     ));
 
@@ -439,7 +487,7 @@ fn create_laser(
             ..Default::default()
         },
         ChargeOnTimer {
-            amount: 0.1, // Every 10 seconds!
+            amount: 1.0, // Every 10 seconds!
         },
         Chargable::default(),
         Movable,
@@ -465,6 +513,8 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
         }
 
         if laser.laser_trigger > 0.0 {
+            // println!("LASER --------------");
+
             laser.laser_trigger -= time.fixed_time_step_seconds as f32;
 
             let direction = transform.right().xy().normalized();
@@ -521,12 +571,8 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
                     let end = Vec2::new(hit_point.x, hit_point.y);
                     to_spawn.push((start, end));
 
-                    let amount_along_normal = hit_normal.dot(direction);
-                    let new_dir = (-2.0 * amount_along_normal * hit_normal
-                        + (1.0 - amount_along_normal) * direction)
-                        .normalized();
+                    let new_dir = direction - 2.0 * direction.dot(hit_normal) * hit_normal;
 
-                    // println!("NEW DIR: {:?}", new_dir);
                     if reflect {
                         raycast(
                             rapier_integration,
@@ -720,6 +766,7 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
             Mesh::VERTICAL_CIRCLE,
             Material::UNLIT,
             rapier_handle,
+            Movable,
             Particle {},
         ));
     }
@@ -856,6 +903,7 @@ fn main() {
                             screen_shake.extend(camera_transform.position.z);
                         *screen_shake_amount *= 0.94;
 
+                        /*
                         // Handle the powered up meter
                         {
                             let total_power: f32 =
@@ -879,7 +927,12 @@ fn main() {
                             powered_up_bar.scale.y = 0.5;
                             powered_up_bar.position.y =
                                 -camera_height / 2.0 + powered_up_bar.scale.y * 0.5;
+
+                            if percent_of_max_power >= 1.0 {
+                                // Powered up
+                            }
                         }
+                        */
                     }
                     Event::FixedUpdate => {
                         {
@@ -981,24 +1034,28 @@ fn main() {
                             };
 
                             if let Some(moving_entity) = scene_info.moving_entity {
-                                let position = &mut world
-                                    .get::<&mut Transform>(moving_entity)
-                                    .unwrap()
-                                    .position;
-                                *position = (pointer_position - scene_info.moving_offset)
-                                    .extend(position.z);
-                                let rigid_body_handle = rapier_integration
-                                    .rigid_body_set
-                                    .get_mut(
-                                        world
-                                            .get::<&mut RapierRigidBody>(moving_entity)
-                                            .unwrap()
-                                            .rigid_body_handle,
-                                    )
-                                    .unwrap();
-                                rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
-                                rigid_body_handle.set_angvel(0.0, false);
-                                rigid_body_handle.set_gravity_scale(0.0, false);
+                                if !world.contains(moving_entity) {
+                                    scene_info.moving_entity = None;
+                                } else {
+                                    let position = &mut world
+                                        .get::<&mut Transform>(moving_entity)
+                                        .unwrap()
+                                        .position;
+                                    *position = (pointer_position - scene_info.moving_offset)
+                                        .extend(position.z);
+                                    let rigid_body_handle = rapier_integration
+                                        .rigid_body_set
+                                        .get_mut(
+                                            world
+                                                .get::<&mut RapierRigidBody>(moving_entity)
+                                                .unwrap()
+                                                .rigid_body_handle,
+                                        )
+                                        .unwrap();
+                                    rigid_body_handle.set_linvel([0.0, 0.0].into(), true);
+                                    rigid_body_handle.set_angvel(0.0, false);
+                                    rigid_body_handle.set_gravity_scale(0.0, false);
+                                }
                             }
 
                             if input.pointer_button_down(PointerButton::Primary) {

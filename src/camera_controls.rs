@@ -10,7 +10,6 @@ pub fn initialize_plugin(resources: &mut Resources) {
 #[derive(Clone)]
 pub enum CameraControlsMode {
     Fly,
-    Orbit,
 }
 
 #[derive(Clone)]
@@ -104,14 +103,6 @@ pub fn update_camera_controls(
             controls.velocity = controls.velocity.normalized() * controls.max_speed;
         }
 
-        // Rotation
-        let (mut pitch, mut yaw, rotating) = if input.pointer_button(controls.rotate_button) {
-            let scale = 4.0;
-            (-difference[1] * scale, -difference[0] * scale, true)
-        } else {
-            (0.0, 0.0, false)
-        };
-
         let mut pan = Vec2::ZERO;
 
         // Panning
@@ -124,14 +115,6 @@ pub fn update_camera_controls(
         pan.x -= -input.scroll().0 as f32 * scale;
         pan.y -= -input.scroll().1 as f32 * scale;
         // };
-
-        if controls.touch_rotate_enabled && input.touch_state.touches.len() == 1 {
-            if let Some((_, touch)) = input.touch_state.touches.iter().next() {
-                let diff = touch.delta();
-                pitch -= diff.y / 400.;
-                yaw -= diff.x / 400.;
-            }
-        }
 
         if let Some(panning_mouse_button) = controls.panning_mouse_button {
             if input.pointer_button(panning_mouse_button) {
@@ -147,10 +130,6 @@ pub fn update_camera_controls(
         let offset = left * pan.x + up * pan.y;
 
         match &mut controls.mode {
-            CameraControlsMode::Orbit => {
-                controls.orbit_target += offset;
-                transform.position += offset;
-            }
             _ => {
                 transform.position += offset;
             }
