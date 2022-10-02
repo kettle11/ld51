@@ -1,3 +1,5 @@
+use std::io::Split;
+
 use camera_controls::CameraControls;
 use koi3::*;
 use rapier2d::prelude::*;
@@ -70,6 +72,7 @@ impl RapierIntegration {
             &self.collider_set,
         );
 
+        let mut entities_to_despawn = Vec::new();
         // If the collider has been moved manually
         for (e, (transform, rigid_body)) in
             world.query::<(&mut Transform, &RapierRigidBody)>().iter()
@@ -90,9 +93,18 @@ impl RapierIntegration {
             if body.rotation().angle() != angle {
                 body.set_rotation(angle, true);
             }
+
+            if transform.position.xy().length_squared() > (1000. * 1000.) {
+                entities_to_despawn.push(e);
+            }
+        }
+
+        for e in entities_to_despawn {
+            let _ = world.despawn(e);
         }
 
         let mut to_despawn = Vec::new();
+
         for collider in self.collider_set.iter() {
             if collider.1.user_data != 0 {
                 let entity = Entity::from_bits(collider.1.user_data as _).unwrap();
@@ -159,6 +171,7 @@ struct SceneInfo {
     screen_shake_amount: f32,
     freeze_time: f32,
     max_power: f32,
+    splitter_mesh: Handle<Mesh>,
 }
 
 struct Materials {
@@ -170,20 +183,6 @@ struct Materials {
     victory_orb: Handle<Material>,
     victory_orb_inner: Handle<Material>,
     environment_chunk: Handle<Material>,
-}
-
-impl SceneInfo {
-    pub fn new(materials: Materials) -> Self {
-        Self {
-            moving_entity: None,
-            moving_offset: Vec2::ZERO,
-            running: true,
-            materials,
-            screen_shake_amount: 0.0,
-            freeze_time: 0.0,
-            max_power: 1.0,
-        }
-    }
 }
 
 // struct PoweredUpBar;
@@ -280,40 +279,13 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
 
     let mut rapier_integration = RapierIntegration::new();
 
-    /*
-    create_cannon(
-        world,
-        &mut rapier_integration,
-        &materials,
-        Transform::new().with_position(-Vec3::X * 2.0),
-    );
-
-    create_victory_orb(
-        world,
-        &mut rapier_integration,
-        &materials,
-        Transform::new().with_position(-Vec3::X * 4.0),
-    );
-    create_laser(
-        world,
-        &mut rapier_integration,
-        &materials,
-        Transform::new().with_position(-Vec3::X * 1.0),
-    );
-
-    create_environment_chunk(world, &mut rapier_integration, &materials, Vec3::ZERO);
-    */
-
-    deserialize_world(
-        &std::fs::read_to_string("src/level.txt").unwrap(),
-        world,
-        &mut rapier_integration,
-        &materials,
-    );
-
-    resources.add(rapier_integration);
-
-    resources.add(SceneInfo {
+    let scene_info = SceneInfo {
+        splitter_mesh: {
+            resources.get::<AssetStore<Mesh>>().add(Mesh::new(
+                &mut resources.get::<Renderer>().raw_graphics_context,
+                circle(-Vec3::Z, 8, 0.5),
+            ))
+        },
         moving_entity: None,
         moving_offset: Vec2::ZERO,
         running: true,
@@ -321,7 +293,32 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         screen_shake_amount: 0.0,
         freeze_time: 0.0,
         max_power: 1.0,
-    });
+    };
+
+    {
+        let mut meshes = resources.get::<AssetStore<Mesh>>();
+
+        deserialize_world(
+            &std::fs::read_to_string("src/level.txt").unwrap(),
+            world,
+            &mut rapier_integration,
+            &scene_info,
+            &meshes,
+        );
+
+        create_splitter(
+            world,
+            &scene_info,
+            &mut meshes,
+            &mut rapier_integration,
+            &scene_info.materials,
+            Transform::new(),
+        );
+    }
+
+    resources.add(rapier_integration);
+
+    resources.add(scene_info);
 }
 
 struct VictoryOrb {
@@ -355,7 +352,8 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
         //victory_orb.power -= 0.05 * time.fixed_time_step_seconds as f32;
 
         if random.f32() > 0.98 {
-            let position_offset: Vec2 = transform.scale.x * random.f32() * random.normalized_vec();
+            let position_offset: Vec2 =
+                transform.scale.x * random.f32() * random.normalized_vec() * 0.8;
             commands.spawn((
                 transform
                     .clone()
@@ -618,10 +616,47 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
                         .unwrap();
 
                     let mut reflect = true;
+                    let end = Vec2::new(hit_point.x, hit_point.y);
+                    to_spawn.push((start, end));
+                    let new_dir = direction - 2.0 * direction.dot(hit_normal) * hit_normal;
+
                     if collider.user_data != 0 {
                         let entity = Entity::from_bits(collider.user_data as _).unwrap();
                         if let Ok(mut chargable) = world.get::<&mut Chargable>(entity) {
                             chargable.charge(8.0 * delta_time);
+                            reflect = false;
+                        }
+
+                        if let Ok(mut chargable) = world.get::<&Splitter>(entity) {
+                            let collider = world
+                                .get::<&RapierRigidBody>(entity)
+                                .unwrap()
+                                .collider_handle;
+                            let transform = world.get::<&Transform>(entity).unwrap();
+                            let new_dir = Vec2::new(direction.y, -direction.x);
+
+                            raycast(
+                                rapier_integration,
+                                QueryFilter::default().exclude_collider(collider),
+                                transform.position.xy(),
+                                new_dir,
+                                to_spawn,
+                                world,
+                                depth - 1,
+                                delta_time,
+                            );
+                            let new_dir = Vec2::new(-direction.y, direction.x);
+
+                            raycast(
+                                rapier_integration,
+                                QueryFilter::default().exclude_collider(collider),
+                                transform.position.xy(),
+                                new_dir,
+                                to_spawn,
+                                world,
+                                depth - 1,
+                                delta_time,
+                            );
                             reflect = false;
                         }
 
@@ -638,7 +673,7 @@ fn run_laser(world: &mut World, resources: &mut Resources) {
                     if reflect {
                         raycast(
                             rapier_integration,
-                            query_filter,
+                            QueryFilter::default(),
                             end + new_dir * 0.05,
                             new_dir,
                             to_spawn,
@@ -735,6 +770,46 @@ fn run_shake_child(world: &mut World, _resources: &Resources) {
 
         shake.amount *= 0.94;
     }
+}
+
+struct Splitter;
+
+fn create_splitter(
+    world: &mut World,
+    scene_info: &SceneInfo,
+    meshes: &AssetStore<Mesh>,
+    rapier_integration: &mut RapierIntegration,
+    materials: &Materials,
+    transform: Transform,
+) {
+    let mesh = meshes.get(&scene_info.splitter_mesh);
+    let mut points = Vec::new();
+    for p in mesh.mesh_data.as_ref().unwrap().positions.iter() {
+        let p: [f32; 2] = p.xy().into();
+        points.push(p.into());
+    }
+    let rapier_handle = rapier_integration.add_rigid_body_with_collider(
+        RigidBodyBuilder::kinematic_position_based().build(),
+        ColliderBuilder::convex_hull(&points)
+            .unwrap()
+            .restitution(0.7)
+            .active_events(ActiveEvents::COLLISION_EVENTS)
+            .build(),
+    );
+
+    let visuals = world.spawn((
+        Transform::new(),
+        scene_info.splitter_mesh.clone(),
+        materials.laser.clone(),
+    ));
+
+    let parent = world.spawn((
+        transform.with_rotation(Quat::from_angle_axis(std::f32::consts::TAU * 0.25, Vec3::Z)),
+        Movable,
+        rapier_handle,
+        Splitter,
+    ));
+    world.set_parent(parent, visuals).unwrap();
 }
 
 fn create_cannon(
@@ -918,6 +993,16 @@ fn serialize_world(world: &mut World) -> String {
             transform.scale.x
         );
     }
+
+    for (_e, (transform, _laser)) in world.query::<(&Transform, &Splitter)>().iter() {
+        output += &format!(
+            "s {:?} {:?} {:?} {:?}\n",
+            transform.position.x,
+            transform.position.y,
+            transform.rotation.to_angle_axis().0,
+            transform.scale.x
+        );
+    }
     output
 }
 
@@ -925,8 +1010,10 @@ fn deserialize_world(
     string: &str,
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &Materials,
+    scene_info: &SceneInfo,
+    meshes: &AssetStore<Mesh>,
 ) {
+    let materials = &scene_info.materials;
     for line in string.trim().split('\n') {
         let mut values = line.split_ascii_whitespace();
         let first_char = values.next();
@@ -950,6 +1037,15 @@ fn deserialize_world(
             Some("c") => create_cannon(world, rapier_integration, materials, transform),
             Some("v") => create_victory_orb(world, rapier_integration, materials, transform),
             Some("b") => create_environment_chunk(world, rapier_integration, materials, transform),
+            Some("s") => create_splitter(
+                world,
+                scene_info,
+                meshes,
+                rapier_integration,
+                materials,
+                transform,
+            ),
+
             Some(_) => {
                 panic!()
             }
