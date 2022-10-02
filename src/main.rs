@@ -155,14 +155,25 @@ struct SceneInfo {
     moving_entity: Option<Entity>,
     moving_offset: Vec2,
     running: bool,
-    materials: Vec<Handle<Material>>,
+    materials: Materials,
     screen_shake_amount: f32,
     freeze_time: f32,
     max_power: f32,
 }
 
+struct Materials {
+    sparkle: Handle<Material>,
+    cannon: Handle<Material>,
+    cannon_inner: Handle<Material>,
+    laser: Handle<Material>,
+    laser_inner: Handle<Material>,
+    victory_orb: Handle<Material>,
+    victory_orb_inner: Handle<Material>,
+    environment_chunk: Handle<Material>,
+}
+
 impl SceneInfo {
-    pub fn new(materials: Vec<Handle<Material>>) -> Self {
+    pub fn new(materials: Materials) -> Self {
         Self {
             moving_entity: None,
             moving_offset: Vec2::ZERO,
@@ -178,32 +189,63 @@ impl SceneInfo {
 // struct PoweredUpBar;
 
 pub fn setup(world: &mut World, resources: &mut Resources) {
-    let materials: Vec<Handle<Material>> = {
+    let materials = {
         let mut material_store = resources.get::<AssetStore<Material>>();
 
-        [
-            material_store.add(Material {
+        Materials {
+            sparkle: {
+                let texture = new_texture_from_bytes(
+                    &mut resources.get::<Renderer>().raw_graphics_context,
+                    "png",
+                    include_bytes!("../assets/star.png"),
+                    koi_graphics_context::TextureSettings::default(),
+                )
+                .unwrap();
+                let star_texture = resources.get::<AssetStore<Texture>>().add(texture);
+
+                material_store.add(Material {
+                    shader: Shader::UNLIT_TRANSPARENT,
+                    base_color_texture: Some(star_texture),
+                    base_color: Color::YELLOW,
+                    ..Default::default()
+                })
+            },
+            cannon: material_store.add(Material {
                 base_color: Color::RED,
                 shader: Shader::UNLIT,
                 ..Default::default()
             }),
-            material_store.add(Material {
+            cannon_inner: material_store.add(Material {
                 base_color: Color::GREEN,
                 shader: Shader::UNLIT,
                 ..Default::default()
             }),
-            material_store.add(Material {
+            laser: material_store.add(Material {
                 base_color: Color::YELLOW.with_chroma(0.2),
                 shader: Shader::UNLIT,
                 ..Default::default()
             }),
-            material_store.add(Material {
+            laser_inner: material_store.add(Material {
                 base_color: Color::PURPLE.with_chroma(0.8).with_lightness(0.6),
                 shader: Shader::UNLIT,
                 ..Default::default()
             }),
-        ]
-        .into()
+            victory_orb: material_store.add(Material {
+                base_color: Color::from_srgb_hex(0xFFD700, 1.0),
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+            victory_orb_inner: material_store.add(Material {
+                base_color: Color::PURPLE.with_chroma(0.8).with_lightness(0.6),
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+            environment_chunk: material_store.add(Material {
+                base_color: Color::PURPLE.with_chroma(0.8).with_lightness(0.6),
+                shader: Shader::UNLIT,
+                ..Default::default()
+            }),
+        }
     };
 
     world.clear();
@@ -305,8 +347,25 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
 
     let mut to_despawn = Vec::new();
     let mut to_explode = Vec::new();
+
+    let mut random = Random::new();
+    let mut commands = CommandBuffer::new();
+
     for (e, (transform, victory_orb)) in world.query::<(&Transform, &mut VictoryOrb)>().iter() {
         //victory_orb.power -= 0.05 * time.fixed_time_step_seconds as f32;
+
+        if random.f32() > 0.98 {
+            let position_offset: Vec2 = transform.scale.x * random.f32() * random.normalized_vec();
+            commands.spawn((
+                transform
+                    .clone()
+                    .with_scale(Vec3::fill(1.0))
+                    .with_position(transform.position + position_offset.extend(0.0)),
+                Shrink::new(1.0),
+                scene_info.materials.sparkle.clone(),
+                Mesh::VERTICAL_QUAD,
+            ))
+        }
 
         let collider = world.get::<&RapierRigidBody>(e).unwrap();
         for contact_pair in rapier_integration
@@ -346,6 +405,9 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
             .unwrap()
             .scale = Vec3::fill(1.0 - (victory_orb.health as f32 / victory_orb.full_health as f32));
     }
+
+    commands.run_on(world);
+
     for e in to_despawn {
         let _ = world.insert(e, (Ephemeral(0.2),));
         let _ = world.remove_one::<Particle>(e);
@@ -388,7 +450,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
 fn create_victory_orb(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &[Handle<Material>],
+    materials: &Materials,
     transform: Transform,
 ) {
     let scale = 2.0;
@@ -400,13 +462,13 @@ fn create_victory_orb(
     let child = world.spawn((
         Transform::new(),
         Mesh::VERTICAL_CIRCLE,
-        materials[2].clone(),
+        materials.victory_orb_inner.clone(),
     ));
 
     let parent = world.spawn((
         transform.with_scale(Vec3::fill(scale) * 1.2),
         Mesh::VERTICAL_CIRCLE,
-        materials[1].clone(),
+        materials.victory_orb.clone(),
         rapier_handle,
         VictoryOrb {
             health: 2,
@@ -457,7 +519,7 @@ fn run_charge_on_timer(world: &mut World, resources: &mut Resources) {
 fn create_laser(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &[Handle<Material>],
+    materials: &Materials,
     transform: Transform,
 ) {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
@@ -471,7 +533,7 @@ fn create_laser(
     let child = world.spawn((
         Transform::new().with_position(Vec3::Z * 0.2),
         Mesh::VERTICAL_QUAD,
-        materials[0].clone(),
+        materials.laser_inner.clone(),
     ));
 
     let parent = world.spawn((
@@ -480,7 +542,7 @@ fn create_laser(
         //     .with_position(position + Vec3::Z * 0.1)
         //     .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
         Mesh::VERTICAL_QUAD,
-        materials[2].clone(),
+        materials.laser.clone(),
         Laser { laser_trigger: 0.0 },
         Activated {
             reset_charge_on_activate: true,
@@ -678,7 +740,7 @@ fn run_shake_child(world: &mut World, _resources: &Resources) {
 fn create_cannon(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &[Handle<Material>],
+    materials: &Materials,
     transform: Transform,
 ) {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
@@ -689,8 +751,16 @@ fn create_cannon(
             .build(),
     );
 
-    let child = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[2].clone()));
-    let visuals = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[1].clone()));
+    let child = world.spawn((
+        Transform::new(),
+        Mesh::VERTICAL_QUAD,
+        materials.cannon_inner.clone(),
+    ));
+    let visuals = world.spawn((
+        Transform::new(),
+        Mesh::VERTICAL_QUAD,
+        materials.cannon.clone(),
+    ));
 
     let parent = world.spawn((
         transform,
@@ -716,7 +786,7 @@ struct EnvironmentChunk;
 fn create_environment_chunk(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &[Handle<Material>],
+    materials: &Materials,
     transform: Transform,
 ) {
     let scale = transform.scale.x;
@@ -730,7 +800,7 @@ fn create_environment_chunk(
     world.spawn((
         transform.with_scale(Vec3::fill(transform.scale.x)),
         Mesh::VERTICAL_QUAD,
-        materials[3].clone(),
+        materials.environment_chunk.clone(),
         rapier_handle,
         Movable,
         EnvironmentChunk,
@@ -773,12 +843,32 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
 }
 
 struct Ephemeral(f32);
+struct Shrink {
+    value: f32,
+    base_scale: f32,
+}
+impl Shrink {
+    pub fn new(base_scale: f32) -> Self {
+        Self {
+            value: 1.0,
+            base_scale,
+        }
+    }
+}
 
 pub fn run_ephemeral(world: &mut World, time: &Time) {
     let mut to_despawn = Vec::new();
     for (e, ephermal) in world.query::<With<&mut Ephemeral, ()>>().iter() {
         ephermal.0 -= time.fixed_time_step_seconds as f32;
         if ephermal.0 < 0.0 {
+            to_despawn.push(e);
+        }
+    }
+
+    for (e, (transform, shrink)) in world.query::<(&mut Transform, &mut Shrink)>().iter() {
+        shrink.value -= time.fixed_time_step_seconds as f32;
+        transform.scale = Vec3::fill(shrink.value * shrink.base_scale);
+        if shrink.value < 0.0 {
             to_despawn.push(e);
         }
     }
@@ -835,7 +925,7 @@ fn deserialize_world(
     string: &str,
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
-    materials: &[Handle<Material>],
+    materials: &Materials,
 ) {
     for line in string.trim().split('\n') {
         let mut values = line.split_ascii_whitespace();
