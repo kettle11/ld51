@@ -111,7 +111,7 @@ pub fn update_camera_controls(
         //      pitch = -input.scroll().1 as f32 * scale;
         //      yaw = -input.scroll().0 as f32 * scale;
         //  } else {
-        let scale = 0.0125;
+        let scale = 0.01;
         pan.x -= -input.scroll().0 as f32 * scale;
         pan.y -= -input.scroll().1 as f32 * scale;
         // };
