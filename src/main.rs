@@ -214,7 +214,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         },
         // CameraControls::default(),
     ));
-    world.set_parent(camera_parent, camera);
+    world.set_parent(camera_parent, camera).unwrap();
 
     let mut rapier_integration = RapierIntegration::new();
 
@@ -596,6 +596,26 @@ struct ScaleChildToChargable {
     child: Entity,
 }
 
+struct Shake {
+    amount: f32,
+    target: Entity,
+}
+
+fn run_shake_child(world: &mut World, _resources: &Resources) {
+    let mut random = Random::new();
+    for (_, shake) in world.query::<(&mut Shake)>().iter() {
+        let screen_shake = Vec2::new(
+            random.range_f32(-shake.amount..shake.amount),
+            random.range_f32(-shake.amount..shake.amount),
+        );
+
+        let mut transform = world.get::<&mut Transform>(shake.target).unwrap();
+        transform.position = screen_shake.extend(transform.position.z);
+
+        shake.amount *= 0.94;
+    }
+}
+
 fn create_cannon(
     world: &mut World,
     rapier_integration: &mut RapierIntegration,
@@ -610,21 +630,26 @@ fn create_cannon(
             .build(),
     );
 
-    let child = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[1].clone()));
+    let child = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[2].clone()));
+    let visuals = world.spawn((Transform::new(), Mesh::VERTICAL_QUAD, materials[1].clone()));
+
     let parent = world.spawn((
         transform,
-        Mesh::VERTICAL_QUAD,
-        materials[0].clone(),
         Cannon {
             fire_direction: Vec2::X,
         },
         Activated::default(),
         Chargable::default(),
         ScaleChildToChargable { child },
+        Shake {
+            amount: 0.0,
+            target: visuals,
+        },
         Movable,
         rapier_handle,
     ));
-    world.set_parent(parent, child).unwrap();
+    world.set_parent(visuals, child).unwrap();
+    world.set_parent(parent, visuals).unwrap();
 }
 
 struct EnvironmentChunk;
@@ -658,13 +683,14 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
     let mut rapier_integration = resources.get::<RapierIntegration>();
 
     let mut to_spawn = Vec::new();
-    for (_, (transform, cannon, activated)) in world
-        .query::<(&Transform, &mut Cannon, &Activated)>()
+    for (_, (transform, cannon, activated, shake)) in world
+        .query::<(&Transform, &mut Cannon, &Activated, &mut Shake)>()
         .iter()
     {
         //  cannon.timer -= time.fixed_time_step_seconds as f32;fr
         if activated.this_frame {
             to_spawn.push((transform.clone(), cannon.fire_direction * 6.0));
+            shake.amount += 0.02;
         }
     }
 
@@ -789,6 +815,8 @@ fn main() {
             let mut random = Random::new();
             move |event, world, resources| match event {
                 Event::Draw => {
+                    run_shake_child(world, resources);
+
                     let screen_shake_amount = &mut resources.get::<SceneInfo>().screen_shake_amount;
                     let screen_shake = Vec2::new(
                         random.range_f32(-*screen_shake_amount..*screen_shake_amount),
