@@ -152,6 +152,7 @@ struct SceneInfo {
     materials: Vec<Handle<Material>>,
     screen_shake_amount: f32,
     freeze_time: f32,
+    max_power: f32,
 }
 
 impl SceneInfo {
@@ -163,9 +164,12 @@ impl SceneInfo {
             materials,
             screen_shake_amount: 0.0,
             freeze_time: 0.0,
+            max_power: 1.0,
         }
     }
 }
+
+struct PoweredUpBar;
 
 pub fn setup(world: &mut World, resources: &mut Resources) {
     let materials: Vec<Handle<Material>> = {
@@ -199,6 +203,14 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
     world.clear();
 
     let camera_parent = world.spawn((Transform::new(),));
+
+    let screen_ui = world.spawn((
+        Transform::new(),
+        PoweredUpBar,
+        Mesh::VERTICAL_QUAD,
+        Material::UNLIT,
+    ));
+
     let camera = world.spawn((
         Transform::new(),
         Camera {
@@ -214,6 +226,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         },
         // CameraControls::default(),
     ));
+    world.set_parent(camera, screen_ui).unwrap();
     world.set_parent(camera_parent, camera).unwrap();
 
     let mut rapier_integration = RapierIntegration::new();
@@ -258,6 +271,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
         materials,
         screen_shake_amount: 0.0,
         freeze_time: 0.0,
+        max_power: 1.0,
     });
 }
 
@@ -277,7 +291,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
     let mut to_despawn = Vec::new();
 
     for (e, (transform, victory_orb)) in world.query::<(&Transform, &mut VictoryOrb)>().iter() {
-        victory_orb.power -= 0.1 * time.fixed_time_step_seconds as f32;
+        victory_orb.power -= 0.05 * time.fixed_time_step_seconds as f32;
 
         let collider = world.get::<&RapierRigidBody>(e).unwrap();
         for contact_pair in rapier_integration
@@ -313,7 +327,7 @@ fn run_victory_orb(world: &mut World, resources: &mut Resources) {
             }
         }
 
-        victory_orb.power = victory_orb.power.clamp(0.2, 1.0);
+        victory_orb.power = victory_orb.power.clamp(0.0, 1.0);
 
         world
             .get::<&mut Transform>(victory_orb.child)
@@ -350,13 +364,13 @@ fn create_victory_orb(
         materials[1].clone(),
         rapier_handle,
         VictoryOrb { power: 0.2, child },
+        Movable,
     ));
 
     world.set_parent(parent, child).unwrap();
 }
 
 struct Laser {
-    child: Entity,
     laser_trigger: f32,
 }
 
@@ -417,16 +431,13 @@ fn create_laser(
         //     .with_rotation(Quat::from_angle_axis(std::f32::consts::PI * 0.25, Vec3::Z)),
         Mesh::VERTICAL_QUAD,
         materials[2].clone(),
-        Laser {
-            child,
-            laser_trigger: 0.0,
-        },
+        Laser { laser_trigger: 0.0 },
         Activated {
             reset_charge_on_activate: true,
             ..Default::default()
         },
         ChargeOnTimer {
-            amount: 1.0, // Every 10 seconds!
+            amount: 0.1, // Every 10 seconds!
         },
         Chargable::default(),
         Movable,
@@ -660,7 +671,7 @@ fn create_environment_chunk(
     materials: &[Handle<Material>],
     transform: Transform,
 ) {
-    let scale = 4.0;
+    let scale = transform.scale.x;
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
         ColliderBuilder::cuboid(0.5 * scale, 0.5 * scale)
@@ -669,7 +680,7 @@ fn create_environment_chunk(
             .build(),
     );
     world.spawn((
-        transform.with_scale(Vec3::fill(4.0)),
+        transform.with_scale(Vec3::fill(transform.scale.x)),
         Mesh::VERTICAL_QUAD,
         materials[3].clone(),
         rapier_handle,
@@ -732,36 +743,40 @@ fn serialize_world(world: &mut World) -> String {
     let mut output = String::new();
     for (_e, (transform, _laser)) in world.query::<(&Transform, &Laser)>().iter() {
         output += &format!(
-            "l {:?} {:?}  {:?}\n",
+            "l {:?} {:?} {:?} {:?}\n",
             transform.position.x,
             transform.position.y,
-            transform.rotation.to_angle_axis().0
+            transform.rotation.to_angle_axis().0,
+            transform.scale.x
         );
     }
 
     for (_e, (transform, _laser)) in world.query::<(&Transform, &Cannon)>().iter() {
         output += &format!(
-            "c {:?} {:?}  {:?}\n",
+            "c {:?} {:?} {:?} {:?}\n",
             transform.position.x,
             transform.position.y,
-            transform.rotation.to_angle_axis().0
+            transform.rotation.to_angle_axis().0,
+            transform.scale.x
         );
     }
 
     for (_e, (transform, _laser)) in world.query::<(&Transform, &VictoryOrb)>().iter() {
         output += &format!(
-            "v {:?} {:?}  {:?}\n",
+            "v {:?} {:?} {:?} {:?}\n",
             transform.position.x,
             transform.position.y,
-            transform.rotation.to_angle_axis().0
+            transform.rotation.to_angle_axis().0,
+            transform.scale.x
         );
     }
     for (_e, (transform, _laser)) in world.query::<(&Transform, &EnvironmentChunk)>().iter() {
         output += &format!(
-            "b {:?} {:?}  {:?}\n",
+            "b {:?} {:?} {:?} {:?}\n",
             transform.position.x,
             transform.position.y,
-            transform.rotation.to_angle_axis().0
+            transform.rotation.to_angle_axis().0,
+            transform.scale.x
         );
     }
     output
@@ -784,9 +799,12 @@ fn deserialize_world(
 
         let r: f32 = values.next().unwrap().parse().unwrap();
 
+        let s: f32 = values.next().unwrap().parse().unwrap();
+
         let transform = Transform::new()
             .with_position(position)
-            .with_rotation(Quat::from_angle_axis(r, Vec3::Z));
+            .with_rotation(Quat::from_angle_axis(r, Vec3::Z))
+            .with_scale(Vec3::fill(s));
 
         match first_char {
             Some("l") => create_laser(world, rapier_integration, materials, transform),
@@ -813,11 +831,13 @@ fn main() {
             setup(world, resources);
 
             let mut random = Random::new();
+
             move |event, world, resources| match event {
                 Event::Draw => {
                     run_shake_child(world, resources);
 
-                    let screen_shake_amount = &mut resources.get::<SceneInfo>().screen_shake_amount;
+                    let mut scene_info = resources.get::<SceneInfo>();
+                    let screen_shake_amount = &mut scene_info.screen_shake_amount;
                     let screen_shake = Vec2::new(
                         random.range_f32(-*screen_shake_amount..*screen_shake_amount),
                         random.range_f32(-*screen_shake_amount..*screen_shake_amount),
@@ -825,9 +845,33 @@ fn main() {
 
                     let mut q = world.query::<(&mut Transform, &Camera)>();
                     let mut iter = q.iter();
-                    let (camera_transform, _camera) = iter.next().unwrap().1;
+                    let (camera_transform, camera) = iter.next().unwrap().1;
                     camera_transform.position = screen_shake.extend(camera_transform.position.z);
                     *screen_shake_amount *= 0.94;
+
+                    // Handle the powered up meter
+                    {
+                        let total_power: f32 =
+                            world.query::<&VictoryOrb>().iter().map(|v| v.1.power).sum();
+
+                        let percent_of_max_power = total_power / scene_info.max_power;
+                        let mut q = world.query::<(&mut Transform, &PoweredUpBar)>();
+                        let mut i = q.iter();
+                        let powered_up_bar = i.next().unwrap().1 .0;
+
+                        let camera_height = match camera.projection_mode {
+                            ProjectionMode::Orthographic { height, .. } => height,
+                            _ => unimplemented!(),
+                        };
+
+                        let view_size = resources.get::<kapp::Window>().size();
+                        let aspect_ratio = view_size.1 as f32 / view_size.0 as f32;
+                        let camera_width_world_space = camera_height * aspect_ratio;
+                        powered_up_bar.scale.x = camera_width_world_space * percent_of_max_power;
+                        powered_up_bar.scale.y = 0.5;
+                        powered_up_bar.position.y =
+                            -camera_height / 2.0 + powered_up_bar.scale.y * 0.5;
+                    }
                 }
                 Event::FixedUpdate => {
                     {
