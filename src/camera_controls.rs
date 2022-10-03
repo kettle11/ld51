@@ -25,6 +25,7 @@ pub struct CameraControls {
     pub enabled: bool,
     pub orbit_target: Vec3,
     pub target_camera: Entity,
+    pub zoom: f32,
 }
 
 impl CameraControls {
@@ -41,6 +42,7 @@ impl CameraControls {
             enabled: true,
             orbit_target: Vec3::ZERO,
             target_camera,
+            zoom: 24.0,
         }
     }
 }
@@ -135,7 +137,7 @@ pub fn update_camera_controls(
             }
         };
 
-        let mut pinch = input.pinch() * 3.0;
+        let mut pinch = input.pinch() * 7.0;
 
         if input.key(Key::Equal) {
             pinch = 0.3;
@@ -143,6 +145,10 @@ pub fn update_camera_controls(
         if input.key(Key::Minus) {
             pinch = -0.3;
         }
+        pinch *= 0.01;
+
+        controls.zoom -= pinch;
+        controls.zoom = controls.zoom.clamp(0.0, 1.0);
         match camera.projection_mode {
             ProjectionMode::Orthographic {
                 height,
@@ -150,7 +156,7 @@ pub fn update_camera_controls(
                 z_far,
             } => {
                 camera.projection_mode = ProjectionMode::Orthographic {
-                    height: (height - pinch).max(10.0).min(50.0),
+                    height: 10.0 + animation_curves::smooth_step(controls.zoom) * 70.0,
                     z_near,
                     z_far,
                 }

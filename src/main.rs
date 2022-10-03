@@ -77,7 +77,7 @@ impl RapierIntegration {
         {
             if transform.scale != rigid_body.scale {
                 rigid_body.scale = transform.scale;
-                println!("SCALE CHANGED!");
+                // println!("SCALE CHANGED!");
             }
             let collider = self
                 .collider_set
@@ -270,7 +270,7 @@ pub fn setup(world: &mut World, resources: &mut Resources) {
             clear_color: Some(Color::CORNFLOWER_BLUE),
 
             projection_mode: ProjectionMode::Orthographic {
-                height: 16.0,
+                height: 24.0,
                 z_near: -1.0,
                 z_far: 2.0,
             },
@@ -458,11 +458,12 @@ fn create_victory_orb(
     rapier_integration: &mut RapierIntegration,
     materials: &Materials,
     transform: Transform,
-) {
-    let scale = 2.0;
+) -> Entity {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
-        ColliderBuilder::ball(0.5 * scale).restitution(0.7).build(),
+        ColliderBuilder::ball(0.5 * transform.scale.x)
+            .restitution(0.7)
+            .build(),
     );
 
     let child = world.spawn((
@@ -471,21 +472,23 @@ fn create_victory_orb(
         materials.victory_orb_inner.clone(),
     ));
 
+    let health = 2 * (transform.scale.x * transform.scale.x) as usize;
     let parent = world.spawn((
-        transform.with_scale(Vec3::fill(scale) * 1.2),
+        transform.with_scale(transform.scale),
         Mesh::VERTICAL_CIRCLE,
         materials.victory_orb.clone(),
         rapier_handle,
         VictoryOrb {
-            health: 2,
-            full_health: 2,
+            health,
+            full_health: health,
             child,
-            gifts: vec![Gift::Splitter],
+            gifts: vec![],
         },
         Movable,
     ));
 
     world.set_parent(parent, child).unwrap();
+    parent
 }
 
 struct Laser {
@@ -555,7 +558,7 @@ fn create_laser(
             ..Default::default()
         },
         ChargeOnTimer {
-            amount: 1.0, // every 10 seconds!
+            amount: 0.1, // every 10 seconds!
         },
         Chargable::default(),
         Movable,
@@ -831,7 +834,7 @@ fn create_cannon(
 ) {
     let rapier_handle = rapier_integration.add_rigid_body_with_collider(
         RigidBodyBuilder::kinematic_position_based().build(),
-        ColliderBuilder::cuboid(0.5, 0.5)
+        ColliderBuilder::ball(0.5)
             .restitution(0.7)
             .active_events(ActiveEvents::COLLISION_EVENTS)
             .build(),
@@ -839,12 +842,12 @@ fn create_cannon(
 
     let child = world.spawn((
         Transform::new(),
-        Mesh::VERTICAL_QUAD,
+        Mesh::VERTICAL_CIRCLE,
         materials.cannon_inner.clone(),
     ));
     let visuals = world.spawn((
         Transform::new(),
-        Mesh::VERTICAL_QUAD,
+        Mesh::VERTICAL_CIRCLE,
         materials.cannon.clone(),
     ));
 
@@ -889,7 +892,6 @@ fn create_environment_chunk(
         materials.environment_chunk.clone(),
         rapier_handle,
         Movable,
-        Reflective,
         EnvironmentChunk,
     ))
 }
@@ -913,7 +915,7 @@ fn run_cannon(world: &mut World, resources: &mut Resources) {
     for (t, v) in to_spawn {
         let rapier_handle = rapier_integration.add_rigid_body_with_collider(
             RigidBodyBuilder::dynamic()
-                .linvel([v.x, v.y].into())
+                .linvel([v.x + 0.01, v.y].into())
                 .build(),
             ColliderBuilder::ball(0.5).restitution(0.7).build(),
         );
@@ -1047,7 +1049,9 @@ fn deserialize_world(
         match first_char {
             Some("l") => create_laser(world, rapier_integration, materials, transform),
             Some("c") => create_cannon(world, rapier_integration, materials, transform),
-            Some("v") => create_victory_orb(world, rapier_integration, materials, transform),
+            Some("v") => {
+                create_victory_orb(world, rapier_integration, materials, transform);
+            }
             Some("b") => {
                 create_environment_chunk(world, rapier_integration, materials, transform);
             }
@@ -1084,6 +1088,9 @@ fn main() {
 
             let mut random = Random::new();
 
+            let mut needs_reload = false;
+
+            let mut last_pointer_position = Vec2::Z;
             move |event, world, resources| {
                 koi3::transform_plugin::update_global_transforms(event, world, resources);
                 match event {
@@ -1137,8 +1144,12 @@ fn main() {
                     }
                     Event::FixedUpdate => {
                         {
-                            if resources.get::<Input>().key_down(Key::L) {
+                            if resources.get::<Input>().key_down(Key::L) || needs_reload {
                                 setup(world, resources);
+                                needs_reload = false;
+                                resources.get::<SceneInfo>().running = false;
+                                let mut rapier_integration = resources.get::<RapierIntegration>();
+                                rapier_integration.step(world);
                                 return;
                             }
 
@@ -1172,8 +1183,12 @@ fn main() {
                                         }
 
                                         let mut set_scale = |scale: f32| {
-                                            if world.get::<&EnvironmentChunk>(moving_entity).is_ok()
-                                            {
+                                            let is_environment_chunk = world
+                                                .get::<&EnvironmentChunk>(moving_entity)
+                                                .is_ok();
+                                            let is_victory_orb =
+                                                world.get::<&VictoryOrb>(moving_entity).is_ok();
+                                            if is_environment_chunk || is_victory_orb {
                                                 {
                                                     let mut transform = world
                                                         .get::<&mut Transform>(moving_entity)
@@ -1183,12 +1198,21 @@ fn main() {
                                                     world.despawn(moving_entity).unwrap();
 
                                                     scene_info.moving_entity =
-                                                        Some(create_environment_chunk(
-                                                            world,
-                                                            &mut rapier_integration,
-                                                            &scene_info.materials,
-                                                            transform,
-                                                        ));
+                                                        if is_environment_chunk {
+                                                            Some(create_environment_chunk(
+                                                                world,
+                                                                &mut rapier_integration,
+                                                                &scene_info.materials,
+                                                                transform,
+                                                            ))
+                                                        } else {
+                                                            Some(create_victory_orb(
+                                                                world,
+                                                                &mut rapier_integration,
+                                                                &scene_info.materials,
+                                                                transform,
+                                                            ))
+                                                        };
                                                 }
 
                                                 #[cfg(debug_assertions)]
@@ -1273,7 +1297,8 @@ fn main() {
                                             world,
                                             &mut rapier_integration,
                                             &scene_info.materials,
-                                            Transform::new(),
+                                            Transform::new()
+                                                .with_position(last_pointer_position.extend(0.0)),
                                         );
                                         println!("STEPPING");
                                         rapier_integration.step(world);
@@ -1284,7 +1309,33 @@ fn main() {
                                             world,
                                             &mut rapier_integration,
                                             &scene_info.materials,
-                                            Transform::new(),
+                                            Transform::new()
+                                                .with_position(last_pointer_position.extend(0.0)),
+                                        );
+                                        println!("STEPPING");
+                                        rapier_integration.step(world);
+                                    }
+
+                                    if resources.get::<Input>().key_down(Key::C) {
+                                        create_cannon(
+                                            world,
+                                            &mut rapier_integration,
+                                            &scene_info.materials,
+                                            Transform::new()
+                                                .with_position(last_pointer_position.extend(0.0)),
+                                        );
+                                        println!("STEPPING");
+                                        rapier_integration.step(world);
+                                    }
+
+                                    if resources.get::<Input>().key_down(Key::S) {
+                                        create_splitter(
+                                            world,
+                                            &scene_info,
+                                            &resources.get::<AssetStore<Mesh>>(),
+                                            &mut rapier_integration,
+                                            Transform::new()
+                                                .with_position(last_pointer_position.extend(0.0)),
                                         );
                                         println!("STEPPING");
                                         rapier_integration.step(world);
@@ -1342,6 +1393,7 @@ fn main() {
                                 );
                                 ray.origin.xy()
                             };
+                            last_pointer_position = pointer_position;
 
                             if let Some(moving_entity) = scene_info.moving_entity {
                                 if !world.contains(moving_entity) {
